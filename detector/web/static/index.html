@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drone Detector</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Courier New', monospace; background: #0a0a0a; color: #00ff41; }
+        .header { background: #111; padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { font-size: 18px; letter-spacing: 2px; }
+        .status { font-size: 12px; color: #888; }
+        .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+        .dot.active { background: #00ff41; }
+        .dot.inactive { background: #ff4444; }
+
+        .alert-banner { display: none; background: #ff0000; color: #fff; padding: 10px 20px; text-align: center; font-weight: bold; font-size: 16px; animation: flash 1s infinite; }
+        .alert-banner.visible { display: block; }
+        @keyframes flash { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+
+        .container { padding: 20px; }
+        .section-title { color: #888; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin: 16px 0 8px; }
+
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th { text-align: left; color: #888; font-weight: normal; padding: 6px 10px; border-bottom: 1px solid #333; font-size: 11px; text-transform: uppercase; }
+        td { padding: 6px 10px; border-bottom: 1px solid #1a1a1a; }
+        tr:hover { background: #111; }
+
+        .tag { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: bold; }
+        .tag.DRONE_CONFIRMED { background: #ff0000; color: #fff; }
+        .tag.DRONE_PROBABLE { background: #ff8800; color: #000; }
+        .tag.UNKNOWN_NEW { background: #ffff00; color: #000; }
+        .tag.DEVICE { background: #333; color: #888; }
+
+        .rssi-bar { display: inline-block; height: 10px; background: #00ff41; min-width: 2px; }
+        .drone-detail { background: #1a0000; border: 1px solid #ff0000; padding: 12px; margin: 8px 0; border-radius: 4px; }
+        .drone-detail .label { color: #ff4444; font-size: 11px; }
+        .drone-detail .value { color: #fff; font-size: 13px; margin-bottom: 4px; }
+
+        .stats { display: flex; gap: 20px; margin-bottom: 16px; }
+        .stat { background: #111; border: 1px solid #333; padding: 10px 16px; border-radius: 4px; }
+        .stat .num { font-size: 24px; color: #fff; }
+        .stat .label { font-size: 11px; color: #888; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>DRONE DETECTOR</h1>
+        <div class="status">
+            <span class="dot active" id="ws-dot"></span>
+            <span id="ws-status">Connecting...</span>
+        </div>
+    </div>
+
+    <div class="alert-banner" id="alert-banner">
+        DRONE DETECTED
+    </div>
+
+    <div class="container">
+        <div class="stats">
+            <div class="stat">
+                <div class="num" id="stat-total">0</div>
+                <div class="label">Devices</div>
+            </div>
+            <div class="stat">
+                <div class="num" id="stat-drones" style="color:#ff0000">0</div>
+                <div class="label">Drones</div>
+            </div>
+            <div class="stat">
+                <div class="num" id="stat-probable" style="color:#ff8800">0</div>
+                <div class="label">Probable</div>
+            </div>
+        </div>
+
+        <div id="drone-details"></div>
+
+        <div class="section-title">All devices</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Class</th>
+                    <th>MAC</th>
+                    <th>Vendor</th>
+                    <th>SSID</th>
+                    <th>RSSI</th>
+                    <th>Signal</th>
+                    <th>Est. Dist</th>
+                    <th>Frames</th>
+                    <th>Last Seen</th>
+                </tr>
+            </thead>
+            <tbody id="device-table"></tbody>
+        </table>
+    </div>
+
+    <script>
+        let ws;
+        function connect() {
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${proto}//${location.host}/ws`);
+            ws.onopen = () => {
+                document.getElementById('ws-dot').className = 'dot active';
+                document.getElementById('ws-status').textContent = 'Connected';
+            };
+            ws.onclose = () => {
+                document.getElementById('ws-dot').className = 'dot inactive';
+                document.getElementById('ws-status').textContent = 'Disconnected';
+                setTimeout(connect, 2000);
+            };
+            ws.onmessage = (e) => {
+                const data = JSON.parse(e.data);
+                render(data);
+            };
+        }
+
+        function render(data) {
+            const devices = data.devices || [];
+            const alerts = data.alerts || [];
+
+            // Stats
+            document.getElementById('stat-total').textContent = devices.length;
+            const confirmed = devices.filter(d => d.classification === 'DRONE_CONFIRMED').length;
+            const probable = devices.filter(d => d.classification === 'DRONE_PROBABLE').length;
+            document.getElementById('stat-drones').textContent = confirmed;
+            document.getElementById('stat-probable').textContent = probable;
+
+            // Alert banner
+            const banner = document.getElementById('alert-banner');
+            if (confirmed > 0) {
+                banner.className = 'alert-banner visible';
+                banner.textContent = `⚠ ${confirmed} DRONE${confirmed > 1 ? 'S' : ''} DETECTED`;
+            } else if (probable > 0) {
+                banner.className = 'alert-banner visible';
+                banner.style.background = '#ff8800';
+                banner.textContent = `${probable} PROBABLE DRONE${probable > 1 ? 'S' : ''}`;
+            } else {
+                banner.className = 'alert-banner';
+            }
+
+            // Drone details
+            const detailsDiv = document.getElementById('drone-details');
+            const drones = devices.filter(d => d.drone_id);
+            if (drones.length > 0) {
+                detailsDiv.innerHTML = drones.map(d => {
+                    const id = d.drone_id;
+                    return `<div class="drone-detail">
+                        <div class="label">SERIAL</div><div class="value">${id.serial || 'Unknown'}</div>
+                        <div class="label">POSITION</div><div class="value">${id.drone_lat.toFixed(6)}, ${id.drone_lon.toFixed(6)} @ ${id.drone_alt.toFixed(0)}m</div>
+                        <div class="label">SPEED / HEADING</div><div class="value">${id.speed.toFixed(1)} m/s / ${id.heading.toFixed(0)}°</div>
+                        ${id.operator_lat ? `<div class="label">OPERATOR</div><div class="value">${id.operator_lat.toFixed(6)}, ${id.operator_lon.toFixed(6)}</div>` : ''}
+                    </div>`;
+                }).join('');
+            } else {
+                detailsDiv.innerHTML = '';
+            }
+
+            // Device table
+            const tbody = document.getElementById('device-table');
+            tbody.innerHTML = devices.map(d => {
+                const rssiPct = Math.max(0, Math.min(100, (d.rssi + 100) * 1.5));
+                const ago = Math.round(Date.now() / 1000 - d.last_seen);
+                const agoStr = ago < 60 ? `${ago}s` : `${Math.round(ago / 60)}m`;
+                const dist = d.distance_m ? `${d.distance_m}m` : '-';
+                return `<tr>
+                    <td><span class="tag ${d.classification}">${d.classification.replace('_', ' ')}</span></td>
+                    <td>${d.mac}</td>
+                    <td>${d.vendor || '-'}</td>
+                    <td>${d.ssid || '-'}</td>
+                    <td>${d.rssi} dBm</td>
+                    <td><span class="rssi-bar" style="width:${rssiPct}px"></span></td>
+                    <td>${dist}</td>
+                    <td>${d.frame_count}</td>
+                    <td>${agoStr} ago</td>
+                </tr>`;
+            }).join('');
+        }
+
+        connect();
+    </script>
+</body>
+</html>

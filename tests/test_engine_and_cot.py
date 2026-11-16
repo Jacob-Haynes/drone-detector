@@ -90,7 +90,11 @@ def test_cot_confirmed_drone_and_operator():
     assert float(uav.find("point").get("lat")) == 51.4778
     assert uav.find("detail/contact").get("callsign") == "1596F35D7A12345"
     assert "drone-detector" in uav.find("detail/remarks").text
-    assert op.get("type") == "a-u-G" and op.find("detail/link").get("uid") == uav.get("uid")
+    assert op.get("type") == "a-u-G" and uav.get("uid") in op.find("detail/remarks").text
+    # OTS stores a marker only if its <link> parent is an EUD: this tool's registered uid
+    for e in (uav, op):
+        assert e.find("detail/link").get("uid").startswith("isrkit-drone-detector-")
+        assert e.find("detail/contact").get("endpoint") is None
 
 
 def test_cot_probable_uses_sensor_position_or_nothing():

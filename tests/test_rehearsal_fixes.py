@@ -167,6 +167,7 @@ def test_drone_cot_reaches_atak_through_fake_ots(monkeypatch):
             time.sleep(0.05)
         assert any("DRONE-SIM-AC123456789A" in x for x in got)
         assert not ots.dropped and em.connected
+        assert "DRONE-SIM-AC123456789A" in ots.markers and not ots.marker_errors  # on OTS's web map
         em.stop()
     finally:
         atak.stop()

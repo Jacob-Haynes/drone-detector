@@ -15,7 +15,9 @@ Markers:
 * DRONE_PROBABLE or no position: ``a-u-A-M-F-Q`` (unknown air UAV) at the sensor's own position
   (``SENSOR_LAT``/``SENSOR_LON``), with the RSSI distance as the error circle. Without a sensor
   position nothing is placed on the map, rather than putting a marker at 0,0.
-* Operator/pilot position from Remote ID / DroneID: ``a-u-G`` ground marker linked to the UAV.
+* Operator/pilot position from Remote ID / DroneID: ``a-u-G`` ground marker (its remarks name the UAV).
+  Every marker's ``<link>`` points at this tool's registered uid: OTS only stores markers whose
+  parent is an EUD.
 
 Rate (contract C4.4): at most one update per ``MIN_UPDATE_S`` (5 s) per track, with a long stale
 time so markers don't flicker between updates. A change of classification is sent at once.
@@ -27,8 +29,6 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import datetime, timezone
-from xml.sax.saxutils import escape, quoteattr
 
 from detector.models import Classification, DetectedDevice
 from detector.tak_client import TakClient
@@ -40,20 +40,6 @@ STALE_SECONDS = 300
 MIN_UPDATE_S = 5.0
 SIM_REMARKS = "SIMULATED: "
 TAK_REPO, TAK_SHORT = "drone-detector", "DRONE-DET"
-
-
-def _isotime(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _event(uid, cot_type, lat, lon, hae, ce, callsign, remarks, now, extra=""):
-    return (
-        f'<event version="2.0" uid={quoteattr(uid)} type={quoteattr(cot_type)} how="m-g"'
-        f' time="{_isotime(now)}" start="{_isotime(now)}" stale="{_isotime(now + STALE_SECONDS)}">'
-        f'<point lat="{lat:.7f}" lon="{lon:.7f}" hae="{hae:.1f}" ce="{ce:.0f}" le="50"/>'
-        f"<detail><contact callsign={quoteattr(callsign)}/><remarks>{escape(remarks)}</remarks>{extra}"
-        f"</detail></event>"
-    )
 
 
 class CotEmitter:
@@ -119,18 +105,23 @@ class CotEmitter:
             logger.debug("No position for %s and no SENSOR_LAT/LON set — not sending CoT", device.mac)
             return []
 
-        extra = ""
+        track = {}
         if d and (d.speed or d.heading):
-            extra = f'<track speed="{d.speed:.1f}" course="{d.heading:.1f}"/>'
-        events = [_event(uid, f"a-{aff}-A-M-F-Q", lat, lon, hae, ce, callsign,
-                         prefix + ", ".join(p for p in parts if p), now, extra)]
+            track = {"speed": d.speed, "course": d.heading}
+        # tak_client.marker: parent link to this tool's registered uid, so OTS also stores it
+        # (OTS web map); see tak_client's module docstring for the fields OTS requires
+        uav = self.client.marker(uid, f"a-{aff}-A-M-F-Q", callsign, lat, lon, now=now, stale_s=STALE_SECONDS,
+                                 hae=hae, ce=ce, le=50.0, remarks=prefix + ", ".join(p for p in parts if p),
+                                 location_source="GPS" if d and d.has_position else None, **track)
+        events = [uav] if uav else []
 
         if d and d.has_operator:
-            events.append(_event(
-                f"{uid}-OPERATOR", "a-u-G", d.operator_lat, d.operator_lon, 0.0, 15.0,
-                f"{callsign} operator", f"{prefix}drone-detector: pilot/operator position for {callsign}", now,
-                f'<link uid={quoteattr(uid)} relation="p-p" type="a-{aff}-A-M-F-Q"/>',
-            ))
+            op = self.client.marker(f"{uid}-OPERATOR", "a-u-G", f"{callsign} operator", d.operator_lat,
+                                    d.operator_lon, now=now, stale_s=STALE_SECONDS, ce=15.0, le=50.0,
+                                    remarks=f"{prefix}drone-detector: pilot/operator position for {callsign} "
+                                            f"(UAV uid {uid})")
+            if op:
+                events.append(op)
         return events
 
     # ── sending ───────────────────────────────────────────────────

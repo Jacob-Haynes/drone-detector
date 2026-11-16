@@ -103,6 +103,7 @@ def main():
             # put "probable" detections near the scenario too
             from detector.simulator import DEFAULT_CENTRE
             cot.sensor_lat, cot.sensor_lon = DEFAULT_CENTRE
+            cot.client.sensor_lat, cot.client.sensor_lon = DEFAULT_CENTRE  # registration SA too
         threading.Thread(target=DemoScenario(engine, centre).run, daemon=True, name="sim").start()
         if centre is None:
             log.warning("SENSOR_LAT/SENSOR_LON not set: simulating around the default demo site")

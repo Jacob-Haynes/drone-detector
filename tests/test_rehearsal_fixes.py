@@ -144,3 +144,30 @@ def test_mesh_text_fits_200_chars():
     devs = [d for d in e.devices.values() if d.classification == Classification.DRONE_PROBABLE]
     text = build_text(devs, simulated=True)
     assert len(text) <= MAX_TEXT and "more" in text
+
+
+# ── contract v5: registered sender against a fake OTS ───────────
+
+def test_drone_cot_reaches_atak_through_fake_ots(monkeypatch):
+    """With the FK-drop, bind-delay and unique-callsign rules enforced, a listener gets our UAV."""
+    from detector.tak_client import TakClient
+    from tests.fake_ots import FakeOTS
+
+    monkeypatch.setenv("TAK_REGISTER_DELAY_S", "0.5")
+    ots = FakeOTS(bind_delay=0.3)
+    got = []
+    atak = TakClient("atak", "ATAK", port=ots.port, station="phone", on_event=got.append).start()
+    try:
+        assert atak.wait_registered(3)
+        em = CotEmitter(tak_port=ots.port, sensor_lat=51.15, sensor_lon=-1.75, simulated=True)
+        e = DetectionEngine(on_alert=em.emit)
+        feed(e, frames.odid_beacon())
+        end = time.time() + 5
+        while time.time() < end and not any("DRONE-SIM-AC123456789A" in x for x in got):
+            time.sleep(0.05)
+        assert any("DRONE-SIM-AC123456789A" in x for x in got)
+        assert not ots.dropped and em.connected
+        em.stop()
+    finally:
+        atak.stop()
+        ots.close()

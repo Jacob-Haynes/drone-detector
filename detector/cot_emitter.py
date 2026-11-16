@@ -1,10 +1,12 @@
 """Emit drone detections as CoT XML over TCP to a TAK server (OpenTAKServer on the Pi).
 
-Plain CoT over TCP to ``TAK_HOST:TAK_PORT`` (default 127.0.0.1:8087, OpenTAKServer's TCP
-streaming port as configured by blufor-tracker's install). OTS needs no handshake
-from a sender. Events with no ``<dest>`` go to every connected client.
+CoT goes over TCP to ``TAK_HOST:TAK_PORT`` (default 127.0.0.1:8087, OpenTAKServer's TCP
+streaming port as configured by blufor-tracker's install) through ``detector.tak_client``
+(kit contract v5). It is one long-lived connection that registers this sensor with OTS
+(uid ``isrkit-drone-detector-<ISR_HOST>``, callsign ``DRONE-DET <ISR_HOST>``) 3 s after each
+connect, before any marker is sent. Real OTS on PostgreSQL drops CoT from unregistered senders.
 
-Sending runs on a background thread with a bounded queue and reconnect backoff,
+Sending runs on that client's background thread with a bounded queue and reconnect backoff,
 so a missing or restarting TAK server never stalls packet capture.
 
 Markers:
@@ -24,14 +26,12 @@ from __future__ import annotations
 
 import logging
 import os
-import queue
-import socket
-import threading
 import time
 from datetime import datetime, timezone
 from xml.sax.saxutils import escape, quoteattr
 
 from detector.models import Classification, DetectedDevice
+from detector.tak_client import TakClient
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +39,7 @@ UID_PREFIX = "DRONE-"
 STALE_SECONDS = 300
 MIN_UPDATE_S = 5.0
 SIM_REMARKS = "SIMULATED: "
-QUEUE_MAX = 200
-BACKOFF_MIN, BACKOFF_MAX = 1.0, 30.0
+TAK_REPO, TAK_SHORT = "drone-detector", "DRONE-DET"
 
 
 def _isotime(ts: float) -> str:
@@ -69,9 +68,8 @@ class CotEmitter:
         self.sensor_lon = sensor_lon
         self.affiliation = (affiliation or os.environ.get("COT_AFFILIATION", "h")).strip()[:1] or "h"
         self.simulated = simulated
-        self.connected = False
-        self._queue: queue.Queue[str] = queue.Queue(maxsize=QUEUE_MAX)
-        self._running = False
+        self.client = TakClient(TAK_REPO, TAK_SHORT, host=self.tak_host, port=self.tak_port,
+                                sensor_lat=sensor_lat, sensor_lon=sensor_lon)
         self._last_sent: dict[str, tuple[float, Classification]] = {}
         self.sent = 0
         self.throttled = 0
@@ -158,58 +156,16 @@ class CotEmitter:
                 del self._last_sent[mac]
         self.sent += 1
         for xml in events:
-            try:
-                self._queue.put_nowait(xml)
-            except queue.Full:
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    pass
-                self._queue.put_nowait(xml)
-        if not self._running:
-            self.start()
+            self.client.send(xml)
+        self.client.start()
+
+    @property
+    def connected(self) -> bool:
+        """True once registered with the TAK server (not just TCP-connected)."""
+        return self.client.registered.is_set()
 
     def start(self):
-        if self._running:
-            return
-        self._running = True
-        threading.Thread(target=self._sender, daemon=True, name="cot-sender").start()
+        self.client.start()
 
     def stop(self):
-        self._running = False
-
-    def _sender(self):
-        backoff = BACKOFF_MIN
-        sock = None
-        pending: str | None = None
-        while self._running:
-            if sock is None:
-                try:
-                    sock = socket.create_connection((self.tak_host, self.tak_port), timeout=5)
-                    sock.settimeout(10)
-                    self.connected = True
-                    backoff = BACKOFF_MIN
-                    logger.info("Connected to TAK server at %s:%d", self.tak_host, self.tak_port)
-                except OSError as e:
-                    self.connected = False
-                    logger.warning("TAK server %s:%d unavailable (%s) — retry in %.0fs",
-                                   self.tak_host, self.tak_port, e, backoff)
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, BACKOFF_MAX)
-                    continue
-            if pending is None:
-                try:
-                    pending = self._queue.get(timeout=1.0)
-                except queue.Empty:
-                    continue
-            try:
-                sock.sendall(pending.encode("utf-8"))
-                pending = None
-            except OSError as e:
-                logger.warning("TAK connection lost (%s), reconnecting", e)
-                self.connected = False
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-                sock = None
+        self.client.stop()

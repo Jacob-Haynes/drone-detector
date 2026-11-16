@@ -110,7 +110,9 @@ def test_related_devices_never_produce_cot():
     assert CotEmitter(sensor_lat=1, sensor_lon=1).build(e.devices["60:60:1F:11:22:33"]) == []
 
 
-def test_cot_sender_reconnects_and_delivers():
+def test_cot_sender_reconnects_registers_then_delivers(monkeypatch):
+    monkeypatch.setenv("TAK_REGISTER_DELAY_S", "0.2")
+    monkeypatch.setenv("ISR_HOST", "isr-pi")
     srv = socket.socket()
     srv.bind(("127.0.0.1", 0))
     port = srv.getsockname()[1]
@@ -127,9 +129,11 @@ def test_cot_sender_reconnects_and_delivers():
     got = b""
     conn, _ = srv.accept()
     conn.settimeout(5)
-    while b"</event>" not in got:
+    while b"DRONE-AC123456789A" not in got:
         got += conn.recv(65536)
-    assert b"DRONE-AC123456789A" in got
+    # contract v5: the registration SA comes first on the connection, then the marker
+    assert got.index(b'uid="isrkit-drone-detector-isr-pi"') < got.index(b"DRONE-AC123456789A")
+    assert b'callsign="DRONE-DET isr-pi"' in got
     em.stop()
     conn.close()
     srv.close()

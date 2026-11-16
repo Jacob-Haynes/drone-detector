@@ -90,7 +90,7 @@ Browse to `http://isr-pi.local:8060` (`WEB_PORT`, default 8060) for the dashboar
 
 ## ATAK Integration
 
-CoT goes over plain TCP to `TAK_HOST:TAK_PORT` (default `127.0.0.1:8087`, OpenTAKServer as set up by blufor-tracker). The sender runs in the background and reconnects with backoff. The detector starts and keeps detecting when no TAK server is up. Set `SENSOR_LAT`/`SENSOR_LON` (the shared OP position) so OUI/SSID-only detections can be placed near the sensor. Without it they are not put on the map (never at 0,0), and the dashboard and heartbeat say "position not set". Disable CoT with `--no-cot`.
+CoT goes over TCP to `TAK_HOST:TAK_PORT` (default `127.0.0.1:8087`, OpenTAKServer as set up by blufor-tracker) through `detector/tak_client.py` (kit contract v5). It keeps one connection open. 3 s after each connect it registers the sensor as `isrkit-drone-detector-<ISR_HOST>`, callsign `DRONE-DET <ISR_HOST>`, at `SENSOR_LAT/LON`, and re-sends that every 60 s. Only then does it send markers, all on that connection. Real OpenTAKServer on PostgreSQL drops CoT from a sender with no EUD row, only relays to a connection that registered after OTS's internal channel opened, and needs unique callsigns. The sender runs in the background and reconnects with backoff. The detector starts and keeps detecting when no TAK server is up. Set `SENSOR_LAT`/`SENSOR_LON` (the shared OP position) so OUI/SSID-only detections can be placed near the sensor. Without it they are not put on the map (never at 0,0), and the dashboard and heartbeat say "position not set". Disable CoT with `--no-cot`.
 
 ## Mesh Alerts
 

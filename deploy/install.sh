@@ -33,6 +33,10 @@ echo "[4/5] Config..."
 if [ ! -f "$ENV_FILE" ]; then
     install -m 600 "$REPO_DIR/deploy/drone-detector.env.example" "$ENV_FILE"
     echo "Created $ENV_FILE"
+elif grep -qE '^WEB_PORT=8080\s*$' "$ENV_FILE"; then
+    # 8080 is OpenTAKServer's nginx; the kit moved the detector to 8060
+    sed -i 's/^WEB_PORT=8080\s*$/WEB_PORT=8060/' "$ENV_FILE"
+    echo "Moved WEB_PORT 8080 -> 8060 in $ENV_FILE (8080 is OpenTAKServer's nginx)"
 fi
 
 echo "[5/5] Installing systemd service (not enabled at boot — pi-profiles starts it)..."
@@ -47,10 +51,10 @@ fi
 PORT=$(grep -E '^WEB_PORT=' "$ENV_FILE" | cut -d= -f2)
 echo ""
 echo "=== Install complete ==="
-echo "  Web UI:  http://<pi-ip>:${PORT:-8080}"
+echo "  Web UI:  http://$(hostname -s).local:${PORT:-8060}/"
 echo "  Start:   sudo pi-profiles drone-detector   (or: sudo systemctl start drone-detector)"
 echo "  Logs:    journalctl -u drone-detector -f"
-if systemctl list-unit-files nginx.service 2>/dev/null | grep -q '^nginx.service' && [ "${PORT:-8080}" = "8080" ]; then
+if [ "${PORT:-8060}" = "8080" ]; then
     echo ""
-    echo "  WARNING: nginx (OpenTAKServer) is installed and listens on 8080. Set WEB_PORT in $ENV_FILE."
+    echo "  WARNING: WEB_PORT=8080 clashes with OpenTAKServer's nginx. Use 8060 (set in $ENV_FILE)."
 fi

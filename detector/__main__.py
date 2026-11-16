@@ -41,7 +41,7 @@ def parse_args():
                      help="Scan Bluetooth LE Remote ID (default on; env BLE_SCAN=0 disables)")
     ble.add_argument("--no-ble", dest="ble", action="store_false")
     parser.add_argument("--ble-adapter", default=env("BLE_ADAPTER") or None, help="e.g. hci0")
-    parser.add_argument("--web-port", type=int, default=int(env("WEB_PORT", "8080")), help="Web UI port")
+    parser.add_argument("--web-port", type=int, default=int(env("WEB_PORT", "8060")), help="Web UI port")
     parser.add_argument("--tak-host", "--fts-host", default=env("TAK_HOST", "127.0.0.1"),
                         help="TAK server host for CoT output (env TAK_HOST)")
     parser.add_argument("--tak-port", "--fts-port", type=int, default=int(env("TAK_PORT", "8087")),

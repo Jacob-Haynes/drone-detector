@@ -61,7 +61,7 @@ sudo bash deploy/install.sh
 
 The install is idempotent and does not enable the service at boot; pi-profiles starts it. Code goes to `/opt/drone-detector` and config to `/etc/drone-detector.env` (see `deploy/drone-detector.env.example`).
 
-**Port 8080:** OpenTAKServer's nginx also listens on 8080 (Marti HTTP API). When OTS is installed on the same Pi, set `WEB_PORT` in `/etc/drone-detector.env` to a free port, for example 8150, and the install warns about this. The kit's port plan is owned by pi-profiles.
+**Port 8060:** the dashboard is on 8060 (the kit port plan). 8080 belongs to OpenTAKServer's nginx (Marti HTTP API). Re-running the install moves an older `/etc/drone-detector.env` from 8080 to 8060.
 
 ## How Capture Works
 
@@ -86,7 +86,7 @@ python -m detector --no-wifi                              # BLE Remote ID only
 
 ## Web UI
 
-Browse to `http://<pi-ip>:<WEB_PORT>` (default 8080) for the dashboard. `GET /api/status` shows the current channel, BLE state and TAK connection.
+Browse to `http://isr-pi.local:8060` (`WEB_PORT`, default 8060) for the dashboard. `GET /api/status` shows the current channel, BLE state and TAK connection.
 
 ## ATAK Integration
 

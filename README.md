@@ -33,7 +33,7 @@ Be clear about this in a brief: **a DJI O3 or O4 Air Unit on its own broadcasts 
 
 The limits matter when you brief what the kit can do:
 - **DJI OcuSync/O2/O3/O4 aircraft** (most current DJI drones) send DroneID on their own radio link. A Wi-Fi card cannot decode that; it needs an SDR. These aircraft *are* seen when they broadcast standard Remote ID (Wi-Fi or Bluetooth), which is mandatory in the US and EU.
-- **Analogue or digital FPV quads** without Remote ID and with no Wi-Fi are invisible to this tool. rf-spectrum is the tool for those.
+- **Analogue or digital FPV quads** without Remote ID and with no Wi-Fi are invisible to this tool. rf-spectrum (a private repo) is the tool for those.
 - Distances from RSSI are rough (±2× is normal). Remote ID/DroneID positions are what the drone reports.
 
 ## Classification
@@ -125,3 +125,7 @@ python -m pytest
 ```
 
 The tests build real-format 802.11 frames with scapy. They cover DJI DroneID v1/v2, Remote ID over beacon, NAN and BLE with hand-checked byte vectors, the classification rules, CoT output and the channel hopper.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

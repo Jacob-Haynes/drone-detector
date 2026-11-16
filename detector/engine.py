@@ -1,106 +1,147 @@
-"""Detection engine: classify, track, and alert on WiFi devices."""
+"""Detection engine: classify, track, and alert on Wi-Fi and Bluetooth devices."""
+
+from __future__ import annotations
 
 import logging
 import threading
 from time import time
 from typing import Callable
 
-from detector.models import Classification, DetectedDevice
+from detector.models import Classification, DetectedDevice, DroneIDData
 from detector.parsers import dji_droneid, oui, remote_id
 
 logger = logging.getLogger(__name__)
 
-STALE_TIMEOUT = 60  # seconds
+STALE_TIMEOUT = 60  # seconds a device stays "active" after its last frame
+CLEANUP_INTERVAL = 30
+UNKNOWN_PERIOD_FRAMES = 10
+
+# How often an alerting device is re-sent to TAK (CoT stale is 2 min, so keep it fresh)
+ALERT_INTERVAL = {
+    Classification.DRONE_CONFIRMED: 3.0,
+    Classification.DRONE_PROBABLE: 30.0,
+}
+
+_RANK = {
+    Classification.DRONE_CONFIRMED: 0,
+    Classification.DRONE_PROBABLE: 1,
+    Classification.DRONE_RELATED: 2,
+    Classification.UNKNOWN_NEW: 3,
+    Classification.DEVICE: 4,
+}
+
+
+def _better(a: Classification, b: Classification) -> bool:
+    return _RANK[a] < _RANK[b]
 
 
 class DetectionEngine:
-    """Processes raw WiFi frames, maintains device tracking, and emits alerts."""
+    """Processes raw frames, maintains device tracking, and emits alerts.
+
+    ``on_alert(device)`` is called (outside the lock) when a device becomes
+    DRONE_CONFIRMED or DRONE_PROBABLE, when its DroneID/Remote ID data updates,
+    and then periodically while it is still being heard (see ``ALERT_INTERVAL``).
+    DRONE_RELATED devices (controllers, goggles, cameras, operator phones) are shown
+    in the UI but never alerted as UAVs.
+    """
 
     def __init__(self, on_alert: Callable[[DetectedDevice], None] | None = None):
         self._devices: dict[str, DetectedDevice] = {}
         self._lock = threading.Lock()
         self._on_alert = on_alert
+        self._last_alert: dict[str, float] = {}
+        self._last_cleanup = time()
 
     @property
     def devices(self) -> dict[str, DetectedDevice]:
         with self._lock:
             return dict(self._devices)
 
+    @staticmethod
+    def _decode_ies(vendor_ies) -> DroneIDData | None:
+        for vie_oui, payload in vendor_ies:
+            data = dji_droneid.parse_vendor_ie(vie_oui, payload) or remote_id.parse_vendor_ie(vie_oui, payload)
+            if data:
+                return data
+        return None
+
     def process_frame(self, frame: dict):
-        """Process a parsed WiFi frame from the scanner."""
+        """Process one observation.
+
+        ``frame`` keys: mac, rssi, ssid, frame_type (beacon|probe_req|probe_resp|nan|ble),
+        vendor_ies [(oui, payload)], and optionally drone_data (pre-decoded, e.g. BLE/NAN)
+        and transport (wifi|ble).
+        """
         mac = frame["mac"]
         rssi = frame["rssi"]
         ssid = frame.get("ssid", "")
-        vendor_ies = frame.get("vendor_ies", [])
+        frame_type = frame.get("frame_type", "")
+        drone_data = frame.get("drone_data") or self._decode_ies(frame.get("vendor_ies", []))
+        now = time()
 
         with self._lock:
             device = self._devices.get(mac)
             if device is None:
-                vendor = oui.lookup(mac)
-                device = DetectedDevice(mac=mac, vendor=vendor, ssid=ssid)
-
-                if oui.is_drone_oui(mac):
-                    device.classification = Classification.DRONE_PROBABLE
-                    logger.warning("DRONE_PROBABLE: %s (%s) RSSI=%d", mac, vendor, rssi)
-                else:
-                    device.classification = Classification.UNKNOWN_NEW
-
+                device = DetectedDevice(mac=mac, vendor=oui.lookup(mac), ssid=ssid,
+                                        classification=Classification.UNKNOWN_NEW,
+                                        transport=frame.get("transport", "wifi"))
                 self._devices[mac] = device
+            previous = device.classification
 
             device.update_rssi(rssi)
             if ssid and not device.ssid:
                 device.ssid = ssid
 
-            # Parse vendor-specific IEs for DroneID / Remote ID
-            drone_data = None
-            for vie_oui, payload in vendor_ies:
-                drone_data = dji_droneid.parse_vendor_ie(vie_oui, payload)
-                if drone_data:
-                    break
-                drone_data = remote_id.parse_vendor_ie(vie_oui, payload)
-                if drone_data:
-                    break
-
             if drone_data:
-                device.drone_id = drone_data
-                if device.classification != Classification.DRONE_CONFIRMED:
-                    device.classification = Classification.DRONE_CONFIRMED
-                    logger.warning(
-                        "DRONE_CONFIRMED: %s serial=%s lat=%.6f lon=%.6f alt=%.0f",
-                        mac,
-                        drone_data.serial,
-                        drone_data.drone_lat,
-                        drone_data.drone_lon,
-                        drone_data.drone_alt,
-                    )
+                if device.drone_id is None:
+                    device.drone_id = drone_data
+                else:
+                    device.drone_id.merge(drone_data)
+                device.classification = Classification.DRONE_CONFIRMED
+                device.reason = f"decoded {drone_data.source or 'drone ID'} broadcast"
+            elif device.classification != Classification.DRONE_CONFIRMED:
+                verdict = oui.assess(mac, ssid or device.ssid, frame_type)
+                if verdict:
+                    cls = Classification[verdict[0]]
+                    if _better(cls, device.classification) or device.classification == Classification.DEVICE:
+                        device.classification, device.reason = cls, verdict[1]
+                elif (device.classification == Classification.UNKNOWN_NEW
+                      and device.frame_count > UNKNOWN_PERIOD_FRAMES):
+                    device.classification = Classification.DEVICE
 
-            # After initial UNKNOWN_NEW period, downgrade to DEVICE if no drone indicators
-            if (
-                device.classification == Classification.UNKNOWN_NEW
-                and device.frame_count > 10
-                and not oui.is_drone_oui(mac)
-            ):
-                device.classification = Classification.DEVICE
+            alert = self._should_alert(device, previous, bool(drone_data), now)
+            if device.classification != previous and device.classification in (
+                    Classification.DRONE_CONFIRMED, Classification.DRONE_PROBABLE, Classification.DRONE_RELATED):
+                log = logger.warning if device.classification != Classification.DRONE_RELATED else logger.info
+                d = device.drone_id
+                log("%s: %s RSSI=%d %s%s", device.classification.value, mac, rssi, device.reason,
+                    f" serial={d.serial} lat={d.drone_lat:.6f} lon={d.drone_lon:.6f}" if d else "")
 
-        # Fire alert callback outside lock
-        if drone_data or (
-            device.classification in (Classification.DRONE_CONFIRMED, Classification.DRONE_PROBABLE)
-            and device.frame_count == 1
-        ):
-            if self._on_alert:
+            if now - self._last_cleanup > CLEANUP_INTERVAL:
+                self._cleanup_locked(now)
+
+        if alert and self._on_alert:
+            try:
                 self._on_alert(device)
+            except Exception:
+                logger.exception("Alert callback failed")
+
+    def _should_alert(self, device: DetectedDevice, previous: Classification, new_data: bool, now: float) -> bool:
+        interval = ALERT_INTERVAL.get(device.classification)
+        if interval is None:
+            return False
+        last = self._last_alert.get(device.mac)
+        upgraded = device.classification != previous
+        if upgraded or last is None or now - last >= interval or (new_data and now - last >= 1.0):
+            self._last_alert[device.mac] = now
+            return True
+        return False
 
     def get_active_devices(self) -> list[dict]:
         """Return active devices as dicts, sorted by classification priority."""
-        priority = {
-            Classification.DRONE_CONFIRMED: 0,
-            Classification.DRONE_PROBABLE: 1,
-            Classification.UNKNOWN_NEW: 2,
-            Classification.DEVICE: 3,
-        }
         with self._lock:
             active = [d.to_dict() for d in self._devices.values() if d.is_active]
-        active.sort(key=lambda d: (priority.get(Classification(d["classification"]), 99), d["last_seen"] * -1))
+        active.sort(key=lambda d: (_RANK.get(Classification(d["classification"]), 99), -d["last_seen"]))
         return active
 
     def get_alerts(self) -> list[dict]:
@@ -110,14 +151,17 @@ class DetectionEngine:
                 d.to_dict()
                 for d in self._devices.values()
                 if d.is_active
-                and d.classification
-                in (Classification.DRONE_CONFIRMED, Classification.DRONE_PROBABLE)
+                and d.classification in (Classification.DRONE_CONFIRMED, Classification.DRONE_PROBABLE)
             ]
 
     def cleanup(self):
         """Remove devices not seen for a long time."""
-        cutoff = time() - STALE_TIMEOUT * 5
         with self._lock:
-            stale = [mac for mac, d in self._devices.items() if d.last_seen < cutoff]
-            for mac in stale:
-                del self._devices[mac]
+            self._cleanup_locked(time())
+
+    def _cleanup_locked(self, now: float):
+        self._last_cleanup = now
+        cutoff = now - STALE_TIMEOUT * 5
+        for mac in [m for m, d in self._devices.items() if d.last_seen < cutoff]:
+            del self._devices[mac]
+            self._last_alert.pop(mac, None)

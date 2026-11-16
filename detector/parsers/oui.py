@@ -1,6 +1,14 @@
-"""OUI (Organizationally Unique Identifier) lookup for MAC address classification."""
+"""OUI (Organizationally Unique Identifier) lookup and drone-likeness rules.
+
+A drone maker's OUI alone does not mean "drone": DJI also makes remote
+controllers, goggles, Osmo/Pocket/Action cameras and mics, and phones running a
+drone app probe for the aircraft's network. ``assess()`` combines OUI, SSID and
+frame type into a conservative classification. Only decoded DroneID / Remote ID
+(see the engine) makes a device DRONE_CONFIRMED.
+"""
 
 import logging
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -70,6 +78,57 @@ def lookup(mac: str) -> str:
     return ""
 
 
+def is_locally_administered(mac: str) -> bool:
+    """Randomised/private MACs have bit 1 of the first octet set; their OUI means nothing."""
+    try:
+        return bool(int(mac[:2], 16) & 0x02)
+    except ValueError:
+        return False
+
+
 def is_drone_oui(mac: str) -> bool:
     """Check if MAC belongs to a known drone manufacturer."""
-    return mac.upper()[:8] in DRONE_OUIS
+    return not is_locally_administered(mac) and mac.upper()[:8] in DRONE_OUIS
+
+
+# SSIDs broadcast by Wi-Fi-link aircraft (the aircraft is the access point)
+DRONE_SSID_RE = re.compile(
+    r"^(dji[-_ ]?(mavic|spark|mini|air|phantom|inspire|tello|fpv|avata|neo|flip)"
+    r"|mavic|spark[-_]|phantom|tello[-_]|rmtt[-_]|anafi|bebop|disco[-_]|parrot|skycontroller"
+    r"|autel|evo[-_ ]?(ii|2|lite|nano)|skydio|holy ?stone|hs\d{3}|potensic|hubsan|sjrc|eachine|fimi"
+    r"|snaptain|ruko|bwine|syma|wifi[-_]?uav|wifi[-_]?fpv|drone[-_ ]|.*[-_ ]drone\b|uav[-_ ])",
+    re.IGNORECASE,
+)
+
+# Drone-maker devices that are NOT aircraft
+ACCESSORY_SSID_RE = re.compile(
+    r"(osmo|pocket|ronin|goggles|dji[-_ ]?(rc|mic|action|om|power|cellular)|^rc[-_ ]?(n\d|pro|plus)?[-_]"
+    r"|^om[-_ ]?\d|action ?\d|^mic[-_ ]?\d|smart ?controller)",
+    re.IGNORECASE,
+)
+
+AP_FRAMES = ("beacon", "probe_resp")
+
+
+def assess(mac: str, ssid: str, frame_type: str):
+    """Return ``(classification_name, reason)`` for drone indicators, or None if there are none.
+
+    classification_name is "DRONE_PROBABLE" or "DRONE_RELATED".
+    """
+    vendor = DRONE_OUIS.get(mac.upper()[:8]) if is_drone_oui(mac) else None
+    is_ap = frame_type in AP_FRAMES
+    ssid = ssid or ""
+
+    if ssid and ACCESSORY_SSID_RE.search(ssid) and (vendor or ssid.lower().startswith("dji")):
+        return "DRONE_RELATED", f"{vendor or 'DJI'} accessory (SSID {ssid!r})"
+    if ssid and DRONE_SSID_RE.match(ssid):
+        if is_ap:
+            return "DRONE_PROBABLE", f"access point with drone SSID {ssid!r}"
+        # A phone/tablet probing for a drone's network: likely the operator
+        return "DRONE_RELATED", f"device probing for drone network {ssid!r} (possible operator)"
+    if vendor and is_ap:
+        why = f"{vendor} access point" + (f" (SSID {ssid!r})" if ssid else " (hidden SSID)")
+        return "DRONE_PROBABLE", why
+    if vendor:
+        return "DRONE_RELATED", f"{vendor} client device (controller, goggles or app)"
+    return None

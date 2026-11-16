@@ -27,7 +27,7 @@ Be clear about this in a brief: **a DJI O3 or O4 Air Unit on its own broadcasts 
    - a Parrot access point ("probable");
    - a DJI controller and an Osmo camera that are correctly *not* alarmed.
 
-   It runs through the real parsers, classifier and CoT output, and every ATAK callsign starts `SIM-`. Say on screen that it is a simulation.
+   It runs through the real parsers, classifier and CoT output. Every ATAK callsign starts `SIM-`, every CoT remark starts `SIMULATED: ` (so tac-advisor's SITREP says so too), mesh texts start `[SIM] ` and the dashboard shows a SIMULATED badge. Say on screen that it is a simulation.
 2. **No extra hardware: live Bluetooth Remote ID.** The Pi's onboard Bluetooth picks up any drone nearby that broadcasts Remote ID over Bluetooth. Many current consumer drones do when Remote ID is on (check the model), as do add-on modules. Without a Wi-Fi adapter the detector runs Bluetooth-only automatically.
 3. **USB monitor-mode Wi-Fi adapter** (e.g. Alfa AWUS036ACHM). Adds Wi-Fi beacon/NAN Remote ID, DJI Wi-Fi DroneID and the OUI/SSID classification.
 
@@ -90,11 +90,27 @@ Browse to `http://isr-pi.local:8060` (`WEB_PORT`, default 8060) for the dashboar
 
 ## ATAK Integration
 
-CoT goes over plain TCP to `TAK_HOST:TAK_PORT` (default `127.0.0.1:8087`, OpenTAKServer as set up by blufor-tracker). The sender runs in the background and reconnects with backoff. The detector starts and keeps detecting when no TAK server is up. Set `SENSOR_LAT`/`SENSOR_LON` so OUI/SSID-only detections can be placed near the sensor. Disable CoT with `--no-cot`.
+CoT goes over plain TCP to `TAK_HOST:TAK_PORT` (default `127.0.0.1:8087`, OpenTAKServer as set up by blufor-tracker). The sender runs in the background and reconnects with backoff. The detector starts and keeps detecting when no TAK server is up. Set `SENSOR_LAT`/`SENSOR_LON` (the shared OP position) so OUI/SSID-only detections can be placed near the sensor. Without it they are not put on the map (never at 0,0), and the dashboard and heartbeat say "position not set". Disable CoT with `--no-cot`.
+
+## Mesh Alerts
+
+New detections (`DRONE_CONFIRMED` or `DRONE_PROBABLE`) go out as a mesh text on `meshbus/tx`, which blufor-tracker's bridge transmits on the LoRa mesh. For example:
+
+```
+DRONE: UAV K0010042 DJI 51.15269,-1.77060 60m
+[SIM] DRONE: 2 new: UAV 5BKD23C0042 RID 51.15500,-1.74500 80m; probable UAV Parrot ~180m
+```
+
+- At most one text every 30 s from this tool. Detections that arrive in between are combined into the next text (up to 200 characters, then "+N more").
+- A text waits 5 s after the first frame, so the serial and position are in it.
+- Only new tracks alert: a first sighting, an upgrade from probable to confirmed, or a track that comes back after 10 minutes. Ongoing tracks only update the map.
+- `MESH_ALERTS=0` (or `--no-mesh`) turns them off.
+
+CoT updates are limited to one per 5 s per track, with a 5-minute stale time so markers stay up between updates.
 
 ## Heartbeat
 
-Every 10 s the detector publishes a retained JSON message to `isrkit/heartbeat/drone-detector` for the launcher. It uses `MQTT_HOST` etc., default the Pi's broker as `guest`.
+Every 10 s the detector publishes a retained JSON message to `isrkit/heartbeat/drone-detector` for the launcher. It uses `MQTT_HOST` etc., default the Pi's broker as `guest`. `host` is `ISR_HOST` if set, else the lowercased short hostname.
 - `ok`: Wi-Fi capture plus Bluetooth are running.
 - `degraded`: only one of them is running, e.g. no Wi-Fi adapter.
 - `error`: neither is running.

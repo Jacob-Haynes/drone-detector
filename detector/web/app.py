@@ -56,6 +56,12 @@ async def get_status():
         "ble_scanning": bool(getattr(ble, "active", False)),
         "cot_enabled": cot is not None,
         "tak_connected": bool(getattr(cot, "connected", False)),
+        "cot_sent": getattr(cot, "sent", 0),
+        "mesh_alerts": status.get("mesh") is not None,
+        "mesh_alerts_sent": getattr(status.get("mesh"), "sent", 0),
+        "sensor_position": status.get("sensor_position"),
+        "sensor_position_text": ("%.5f, %.5f" % tuple(status["sensor_position"]))
+        if status.get("sensor_position") else "position not set",
     }
 
 

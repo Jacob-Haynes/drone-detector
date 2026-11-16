@@ -16,11 +16,13 @@ STALE_TIMEOUT = 60  # seconds a device stays "active" after its last frame
 CLEANUP_INTERVAL = 30
 UNKNOWN_PERIOD_FRAMES = 10
 
-# How often an alerting device is re-sent to TAK (CoT stale is 2 min, so keep it fresh)
+# How often an alerting device is re-sent to TAK (CoT stale is 5 min). Contract C4.4: at most one
+# CoT update per 5 s per track; the CoT emitter enforces that too.
 ALERT_INTERVAL = {
-    Classification.DRONE_CONFIRMED: 3.0,
-    Classification.DRONE_PROBABLE: 30.0,
+    Classification.DRONE_CONFIRMED: 5.0,
+    Classification.DRONE_PROBABLE: 60.0,
 }
+NEW_DATA_MIN_S = 5.0
 
 _RANK = {
     Classification.DRONE_CONFIRMED: 0,
@@ -132,7 +134,7 @@ class DetectionEngine:
             return False
         last = self._last_alert.get(device.mac)
         upgraded = device.classification != previous
-        if upgraded or last is None or now - last >= interval or (new_data and now - last >= 1.0):
+        if upgraded or last is None or now - last >= interval or (new_data and now - last >= NEW_DATA_MIN_S):
             self._last_alert[device.mac] = now
             return True
         return False

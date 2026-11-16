@@ -48,6 +48,8 @@
     <div class="header">
         <h1>DRONE DETECTOR</h1>
         <div class="status">
+            <span id="sim-badge" style="display:none;background:#b8860b;color:#000;padding:2px 8px;border-radius:3px;font-weight:bold;margin-right:10px">SIMULATED</span>
+            <span id="sensor-pos" style="margin-right:12px"></span>
             <span class="dot active" id="ws-dot"></span>
             <span id="ws-status">Connecting...</span>
         </div>
@@ -97,6 +99,15 @@
     <script>
         // SSIDs, serials and vendor strings come off the air: always escape before innerHTML
         const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        async function refreshStatus() {
+            try {
+                const s = await (await fetch('/api/status')).json();
+                document.getElementById('sim-badge').style.display = s.mode === 'simulate' ? 'inline' : 'none';
+                document.getElementById('sensor-pos').textContent = 'OP: ' + s.sensor_position_text;
+            } catch (e) { /* server restarting */ }
+        }
+        refreshStatus();
+        setInterval(refreshStatus, 10000);
         let ws;
         function connect() {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';

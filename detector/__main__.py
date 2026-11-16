@@ -50,6 +50,8 @@ def parse_args():
                         help="This sensor's latitude, used to place detections that carry no GPS")
     parser.add_argument("--sensor-lon", type=float, default=_env_float("SENSOR_LON"))
     parser.add_argument("--no-cot", action="store_true", help="Disable CoT output")
+    parser.add_argument("--no-mesh", dest="mesh", action="store_false", default=env("MESH_ALERTS", "1") != "0",
+                        help="No mesh alerts on meshbus/tx (env MESH_ALERTS=0)")
     parser.add_argument("--simulate", action="store_true",
                         help="Simulated detections, no hardware (CoT callsigns get a SIM- prefix)")
     return parser.parse_args()
@@ -72,10 +74,25 @@ def main():
                          sensor_lon=args.sensor_lon, simulated=args.simulate)
         cot.start()
 
-    engine = DetectionEngine(on_alert=cot.emit if cot else None)
+    mesh = None
+    if args.mesh:
+        from detector.mesh_alerts import MeshAlerter, mqtt_publisher
+
+        publish = mqtt_publisher()
+        if publish is not None:
+            mesh = MeshAlerter(publish, simulated=args.simulate).start()
+
+    def on_alert(device):
+        if cot is not None:
+            cot.emit(device)
+        if mesh is not None:
+            mesh.note(device)
+
+    engine = DetectionEngine(on_alert=on_alert if (cot or mesh) else None)
     web_module.engine = engine
     web_module.status = {"mode": "simulate" if args.simulate else "live", "interface": None,
-                         "hopper": None, "ble": None, "cot": cot}
+                         "hopper": None, "ble": None, "cot": cot, "mesh": mesh,
+                         "sensor_position": None}
 
     if args.simulate:
         from detector.simulator import DemoScenario
@@ -87,6 +104,8 @@ def main():
             from detector.simulator import DEFAULT_CENTRE
             cot.sensor_lat, cot.sensor_lon = DEFAULT_CENTRE
         threading.Thread(target=DemoScenario(engine, centre).run, daemon=True, name="sim").start()
+        if centre is None:
+            log.warning("SENSOR_LAT/SENSOR_LON not set: simulating around the default demo site")
     else:
         if not args.no_wifi:
             from detector.scanner import ChannelHopper, default_channel_plan, parse_channels, start_capture
@@ -108,12 +127,19 @@ def main():
             ble.start()
             web_module.status["ble"] = ble
 
+    if cot is not None and cot.sensor_lat is not None and cot.sensor_lon is not None:
+        web_module.status["sensor_position"] = (cot.sensor_lat, cot.sensor_lon)
+    elif args.sensor_lat is not None and args.sensor_lon is not None:
+        web_module.status["sensor_position"] = (args.sensor_lat, args.sensor_lon)
+    else:
+        log.warning("SENSOR_LAT/SENSOR_LON not set: detections without GPS are not put on the map")
+
     from detector.heartbeat import Heartbeat
     from detector.scanner import CAPTURE_STATE
 
     def heartbeat_state():
         if args.simulate:
-            return "simulate", "ok", "scripted demo scenario (SIM- callsigns)"
+            return "simulate", "ok", "scripted demo scenario (SIMULATED)"
         wifi = (not args.no_wifi) and CAPTURE_STATE["running"]
         ble = web_module.status.get("ble")
         ble_on = bool(getattr(ble, "active", False))
@@ -123,6 +149,8 @@ def main():
                  "ble on" if ble_on else "ble off"]
         if cot is not None:
             parts.append("tak connected" if cot.connected else "tak down")
+        if web_module.status.get("sensor_position") is None:
+            parts.append("position not set")
         status = "ok" if wifi and (ble_on or not args.ble) else ("degraded" if wifi or ble_on else "error")
         return "cpu", status, "; ".join(parts)
 

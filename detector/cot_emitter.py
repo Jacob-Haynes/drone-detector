@@ -14,6 +14,10 @@ Markers:
   (``SENSOR_LAT``/``SENSOR_LON``), with the RSSI distance as the error circle. Without a sensor
   position nothing is placed on the map, rather than putting a marker at 0,0.
 * Operator/pilot position from Remote ID / DroneID: ``a-u-G`` ground marker linked to the UAV.
+
+Rate (contract C4.4): at most one update per ``MIN_UPDATE_S`` (5 s) per track, with a long stale
+time so markers don't flicker between updates. A change of classification is sent at once.
+Labelling (C4.3): in ``--simulate`` the remarks start ``SIMULATED: `` and callsigns ``SIM-``.
 """
 
 from __future__ import annotations
@@ -32,7 +36,9 @@ from detector.models import Classification, DetectedDevice
 logger = logging.getLogger(__name__)
 
 UID_PREFIX = "DRONE-"
-STALE_SECONDS = 120
+STALE_SECONDS = 300
+MIN_UPDATE_S = 5.0
+SIM_REMARKS = "SIMULATED: "
 QUEUE_MAX = 200
 BACKOFF_MIN, BACKOFF_MAX = 1.0, 30.0
 
@@ -66,6 +72,9 @@ class CotEmitter:
         self.connected = False
         self._queue: queue.Queue[str] = queue.Queue(maxsize=QUEUE_MAX)
         self._running = False
+        self._last_sent: dict[str, tuple[float, Classification]] = {}
+        self.sent = 0
+        self.throttled = 0
 
     # ── building ──────────────────────────────────────────────────
 
@@ -97,6 +106,7 @@ class CotEmitter:
                 parts.append(f"operator ID {d.operator_id}")
             if d.description:
                 parts.append(d.description)
+        prefix = SIM_REMARKS if self.simulated else ""
         dist = device.distance_estimate_m
 
         if d and d.has_position:
@@ -115,20 +125,39 @@ class CotEmitter:
         if d and (d.speed or d.heading):
             extra = f'<track speed="{d.speed:.1f}" course="{d.heading:.1f}"/>'
         events = [_event(uid, f"a-{aff}-A-M-F-Q", lat, lon, hae, ce, callsign,
-                         ", ".join(p for p in parts if p), now, extra)]
+                         prefix + ", ".join(p for p in parts if p), now, extra)]
 
         if d and d.has_operator:
             events.append(_event(
                 f"{uid}-OPERATOR", "a-u-G", d.operator_lat, d.operator_lon, 0.0, 15.0,
-                f"{callsign} operator", f"drone-detector: pilot/operator position for {callsign}", now,
+                f"{callsign} operator", f"{prefix}drone-detector: pilot/operator position for {callsign}", now,
                 f'<link uid={quoteattr(uid)} relation="p-p" type="a-{aff}-A-M-F-Q"/>',
             ))
         return events
 
     # ── sending ───────────────────────────────────────────────────
 
-    def emit(self, device: DetectedDevice):
-        for xml in self.build(device):
+    def should_send(self, device: DetectedDevice, now: float) -> bool:
+        """Per-track rate limit: one update per MIN_UPDATE_S, except on a classification change."""
+        last = self._last_sent.get(device.mac)
+        if last is not None and last[1] == device.classification and now - last[0] < MIN_UPDATE_S:
+            return False
+        return True
+
+    def emit(self, device: DetectedDevice, now: float | None = None):
+        now = time.time() if now is None else now
+        if not self.should_send(device, now):
+            self.throttled += 1
+            return
+        events = self.build(device, now)
+        if not events:
+            return
+        self._last_sent[device.mac] = (now, device.classification)
+        if len(self._last_sent) > 2000:  # forget long-gone tracks
+            for mac in [m for m, (t, _) in self._last_sent.items() if now - t > STALE_SECONDS]:
+                del self._last_sent[mac]
+        self.sent += 1
+        for xml in events:
             try:
                 self._queue.put_nowait(xml)
             except queue.Full:

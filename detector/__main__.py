@@ -6,6 +6,8 @@ import argparse
 import asyncio
 import logging
 import os
+import signal
+import sys
 import threading
 
 import uvicorn
@@ -60,6 +62,9 @@ def main():
         datefmt="%H:%M:%S",
     )
     args = parse_args()
+    # uvicorn re-raises SIGTERM after its own shutdown; turn it into a normal exit so the
+    # finally blocks run (heartbeat publishes "stopped" instead of the broker's "error" will)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     cot = None
     if not args.no_cot:

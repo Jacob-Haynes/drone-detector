@@ -6,8 +6,9 @@ from time import time
 
 
 class Classification(Enum):
-    DRONE_CONFIRMED = "DRONE_CONFIRMED"
-    DRONE_PROBABLE = "DRONE_PROBABLE"
+    DRONE_CONFIRMED = "DRONE_CONFIRMED"  # decoded DroneID / Remote ID broadcast
+    DRONE_PROBABLE = "DRONE_PROBABLE"  # drone-maker access point with a drone-like SSID or no SSID
+    DRONE_RELATED = "DRONE_RELATED"  # drone-maker device that is not the aircraft: controller, goggles, camera, phone app
     UNKNOWN_NEW = "UNKNOWN_NEW"
     DEVICE = "DEVICE"
 
@@ -26,6 +27,25 @@ class DroneIDData:
     operator_lon: float = 0.0
     home_lat: float = 0.0
     home_lon: float = 0.0
+    height_agl: float = 0.0
+    operator_id: str = ""
+    ua_type: str = ""
+    description: str = ""
+    source: str = ""  # dji-droneid | remoteid-wifi-beacon | remoteid-wifi-nan | remoteid-ble
+
+    @property
+    def has_position(self) -> bool:
+        return self.drone_lat != 0.0 or self.drone_lon != 0.0
+
+    @property
+    def has_operator(self) -> bool:
+        return self.operator_lat != 0.0 or self.operator_lon != 0.0
+
+    def merge(self, other: "DroneIDData") -> None:
+        """Fill fields from a newer partial message (Remote ID sends BasicID and Location separately)."""
+        for name, value in vars(other).items():
+            if value not in ("", 0.0, 0):
+                setattr(self, name, value)
 
 
 @dataclass
@@ -42,6 +62,8 @@ class DetectedDevice:
     last_seen: float = field(default_factory=time)
     drone_id: DroneIDData | None = None
     frame_count: int = 0
+    reason: str = ""  # why it got its classification (shown in UI and CoT remarks)
+    transport: str = "wifi"  # wifi | ble
 
     def update_rssi(self, rssi: int):
         now = time()
@@ -58,10 +80,12 @@ class DetectedDevice:
         """Rough distance estimate from RSSI using log-distance path loss model."""
         if self.rssi >= 0:
             return None
-        # Assume tx_power=20dBm, path_loss_exponent=2.5 (open air)
+        # Log-distance model: ~20 dBm EIRP, ~40 dB free-space loss at 1 m (2.4 GHz),
+        # path-loss exponent 2.5 (open ground). Very rough: +-2x is normal.
         tx_power = 20
+        ref_loss_1m = 40
         n = 2.5
-        return 10 ** ((tx_power - self.rssi) / (10 * n))
+        return 10 ** ((tx_power - ref_loss_1m - self.rssi) / (10 * n))
 
     @property
     def is_active(self) -> bool:
@@ -79,6 +103,8 @@ class DetectedDevice:
             "last_seen": self.last_seen,
             "frame_count": self.frame_count,
             "active": self.is_active,
+            "reason": self.reason,
+            "transport": self.transport,
             "drone_id": {
                 "serial": self.drone_id.serial,
                 "drone_lat": self.drone_id.drone_lat,
@@ -88,6 +114,10 @@ class DetectedDevice:
                 "heading": self.drone_id.heading,
                 "operator_lat": self.drone_id.operator_lat,
                 "operator_lon": self.drone_id.operator_lon,
+                "height_agl": self.drone_id.height_agl,
+                "operator_id": self.drone_id.operator_id,
+                "ua_type": self.drone_id.ua_type,
+                "source": self.drone_id.source,
             }
             if self.drone_id
             else None,

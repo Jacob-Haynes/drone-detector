@@ -1,106 +1,140 @@
-"""Parse DJI DroneID from 802.11 beacon frame vendor-specific IEs.
+"""Parse DJI DroneID from 802.11 beacon vendor-specific IEs (Wi-Fi-link DJI drones).
 
-DJI drones broadcast vendor-specific information elements in beacon frames
-with OUI 26:D5:B0. The payload contains drone telemetry including GPS
-coordinates, altitude, speed, and serial number.
+DJI aircraft that use Wi-Fi for their video link (Spark, Mavic Air/Pro Wi-Fi mode,
+Mini SE/Mini 2 with Wi-Fi, Tello is not one) put DroneID telemetry in a vendor
+IE of their beacons. Aircraft on OcuSync/O2/O3/O4 transmit DroneID on their own
+radio link instead, which a Wi-Fi card cannot decode (that needs an SDR). Newer
+DJI aircraft also broadcast standard Remote ID, see ``remote_id``.
 
-Reference: https://github.com/proto17/dji_droneid
+Layout (after the 3-byte OUI 26:37:12), per Kismet's ``dot11_ie_221_dji_droneid``
+and the "Drone Security and the Mysterious Case of DJI's DroneID" (NDSS 2023) work::
+
+    u8  vendor_type   (0x58)
+    u8  unk1          (0x62)
+    u8  unk2          (0x13)
+    u8  subcommand    0x10 = flight registration (telemetry), 0x11 = flight purpose
+
+    flight registration (0x10):
+      u8  version     1 or 2
+      u16 seq
+      u16 state_info  bit flags, 0x40 = GPS valid
+      16s serial
+      s32 lon, s32 lat              radians * 1e7  ->  degrees = raw / 174533.0
+      v1: s16 altitude (m), s16 height (m),
+          s16 v_north, s16 v_east, s16 v_up (cm/s), s16 pitch, s16 roll, s16 yaw (deg*100),
+          s32 home_lon, s32 home_lat, u8 product_type, u8 uuid_len, uuid
+      v2: s16 height (dm), s16 altitude (m),
+          s16 v_north, s16 v_east, s16 v_up (cm/s), s16 yaw (deg*100),
+          u64 gps_time, s32 app_lat, s32 app_lon (pilot/app position),
+          s32 home_lon, s32 home_lat, u8 product_type, u8 uuid_len, uuid
+
+    flight purpose (0x11):
+      16s serial, u8 drone_id_len, 10s drone_id, u8 purpose_len, purpose...
+
+DJI firmware varies and these fields are reverse-engineered, so only serial and
+drone position are treated as reliable. Everything else is best effort and sanity checked.
 """
 
+from __future__ import annotations
+
 import logging
+import math
 import struct
 
 from detector.models import DroneIDData
 
 logger = logging.getLogger(__name__)
 
-DJI_OUI = b"\x26\xd5\xb0"
+DJI_OUI = b"\x26\x37\x12"
+SUBCMD_FLIGHT_REG = 0x10
+SUBCMD_FLIGHT_PURPOSE = 0x11
+RAW_TO_DEG = 174533.0  # raw = radians * 1e7  =>  deg = raw * 180 / (pi * 1e7)
 
-# DroneID message types
-MSG_TYPE_DRONE_ID = 0x10
+STATE_GPS_VALID = 0x40
+
+_HEADER = 4  # vendor_type, unk1, unk2, subcommand
+_REG_COMMON = struct.Struct("<BHH16sii")  # version, seq, state, serial, lon, lat  (29 bytes)
+_V1_TAIL = struct.Struct("<hhhhhhhhii")  # alt, height, vn, ve, vu, pitch, roll, yaw, home_lon, home_lat
+_V2_TAIL = struct.Struct("<hhhhhhQiiii")  # height, alt, vn, ve, vu, yaw, gps_time, app_lat, app_lon, home_lon, home_lat
+
+
+def _deg(raw: int) -> float:
+    return raw / RAW_TO_DEG
+
+
+def _valid(lat: float, lon: float) -> bool:
+    return abs(lat) <= 90 and abs(lon) <= 180 and not (lat == 0 and lon == 0)
+
+
+def _serial(raw: bytes) -> str:
+    return raw.split(b"\x00")[0].decode("ascii", errors="replace").strip()
 
 
 def parse_vendor_ie(oui: bytes, payload: bytes) -> DroneIDData | None:
-    """Parse a DJI vendor-specific IE payload into DroneIDData.
-
-    Returns None if the IE is not a DJI DroneID or cannot be parsed.
-    """
-    if oui != DJI_OUI:
+    """Parse a vendor IE (payload = bytes after the OUI). None if not DJI DroneID or unparseable."""
+    if oui != DJI_OUI or len(payload) < _HEADER + 1:
         return None
-
-    if len(payload) < 58:
-        return None
-
+    subcommand = payload[3]
+    record = payload[_HEADER:]
     try:
-        return _parse_droneid_payload(payload)
-    except Exception:
-        logger.debug("Failed to parse DJI DroneID payload (%d bytes)", len(payload))
+        if subcommand == SUBCMD_FLIGHT_REG:
+            return _parse_flight_reg(record)
+        if subcommand == SUBCMD_FLIGHT_PURPOSE:
+            return _parse_flight_purpose(record)
+    except (struct.error, ValueError):
+        logger.debug("Failed to parse DJI DroneID subcommand 0x%02x (%d bytes)", subcommand, len(record))
+    return None
+
+
+def _parse_flight_reg(rec: bytes) -> DroneIDData | None:
+    if len(rec) < _REG_COMMON.size:
         return None
+    version, _seq, state, serial_raw, raw_lon, raw_lat = _REG_COMMON.unpack_from(rec, 0)
+    data = DroneIDData(serial=_serial(serial_raw), source="dji-droneid")
 
+    lat, lon = _deg(raw_lat), _deg(raw_lon)
+    # state_info bits are not reliable across firmware, so trust sane coordinates instead
+    if _valid(lat, lon):
+        data.drone_lat, data.drone_lon = lat, lon
 
-def _parse_droneid_payload(data: bytes) -> DroneIDData | None:
-    """Parse the DJI DroneID binary payload.
+    off = _REG_COMMON.size
+    yaw = None
+    vn = ve = 0
+    if version == 2 and len(rec) >= off + _V2_TAIL.size:
+        height_dm, alt, vn, ve, _vu, yaw, _gps_time, app_lat, app_lon, home_lon, home_lat = \
+            _V2_TAIL.unpack_from(rec, off)
+        data.drone_alt = float(alt)
+        data.height_agl = height_dm / 10.0
+        if _valid(_deg(app_lat), _deg(app_lon)):
+            data.operator_lat, data.operator_lon = _deg(app_lat), _deg(app_lon)
+        if _valid(_deg(home_lat), _deg(home_lon)):
+            data.home_lat, data.home_lon = _deg(home_lat), _deg(home_lon)
+    elif len(rec) >= off + _V1_TAIL.size:
+        alt, height, vn, ve, _vu, _pitch, _roll, yaw, home_lon, home_lat = _V1_TAIL.unpack_from(rec, off)
+        data.drone_alt = float(alt)
+        data.height_agl = float(height)
+        if _valid(_deg(home_lat), _deg(home_lon)):
+            data.home_lat, data.home_lon = _deg(home_lat), _deg(home_lon)
+            # v1 has no pilot position; the home point is where the pilot usually is
+            data.operator_lat, data.operator_lon = data.home_lat, data.home_lon
 
-    The format is reverse-engineered and may vary across DJI firmware versions.
-    Field offsets based on proto17/dji_droneid research.
-    """
-    if len(data) < 58:
+    speed = math.hypot(vn, ve) / 100.0
+    if speed < 100:  # >100 m/s means we decoded garbage
+        data.speed = speed
+    if yaw is not None and -18000 <= yaw <= 18000:
+        data.heading = (yaw / 100.0) % 360
+    elif data.speed > 0.5:
+        data.heading = math.degrees(math.atan2(ve, vn)) % 360
+
+    if not data.serial and not data.has_position:
         return None
+    return data
 
-    msg_type = data[0]
 
-    # Extract serial number (typically at offset 2, 16 bytes, null-terminated ASCII)
-    serial_raw = data[2:18]
-    serial = serial_raw.split(b"\x00")[0].decode("ascii", errors="replace")
-
-    # GPS coordinates stored as int32 scaled by 1e-7 (like Meshtastic)
-    # Offsets vary by message version; common layout:
-    drone_lon_i = struct.unpack_from("<i", data, 18)[0]
-    drone_lat_i = struct.unpack_from("<i", data, 22)[0]
-    drone_alt = struct.unpack_from("<h", data, 26)[0]  # metres relative to takeoff
-    speed_x = struct.unpack_from("<h", data, 28)[0]  # cm/s
-    speed_y = struct.unpack_from("<h", data, 30)[0]  # cm/s
-
-    drone_lat = drone_lat_i / 1e7
-    drone_lon = drone_lon_i / 1e7
-    speed = (speed_x**2 + speed_y**2) ** 0.5 / 100.0  # m/s
-
-    # Heading from velocity vector
-    import math
-
-    heading = math.degrees(math.atan2(speed_x, speed_y)) % 360
-
-    # Operator/home position (if present, typically at offset 38+)
-    operator_lat = 0.0
-    operator_lon = 0.0
-    home_lat = 0.0
-    home_lon = 0.0
-
-    if len(data) >= 50:
-        home_lon_i = struct.unpack_from("<i", data, 34)[0]
-        home_lat_i = struct.unpack_from("<i", data, 38)[0]
-        home_lat = home_lat_i / 1e7
-        home_lon = home_lon_i / 1e7
-
-    if len(data) >= 58:
-        op_lon_i = struct.unpack_from("<i", data, 42)[0]
-        op_lat_i = struct.unpack_from("<i", data, 46)[0]
-        operator_lat = op_lat_i / 1e7
-        operator_lon = op_lon_i / 1e7
-
-    # Sanity check coordinates
-    if abs(drone_lat) > 90 or abs(drone_lon) > 180:
+def _parse_flight_purpose(rec: bytes) -> DroneIDData | None:
+    if len(rec) < 16:
         return None
-
-    return DroneIDData(
-        serial=serial,
-        drone_lat=drone_lat,
-        drone_lon=drone_lon,
-        drone_alt=float(drone_alt),
-        speed=speed,
-        heading=heading,
-        operator_lat=operator_lat,
-        operator_lon=operator_lon,
-        home_lat=home_lat,
-        home_lon=home_lon,
-    )
+    serial = _serial(rec[:16])
+    if not serial:
+        return None
+    return DroneIDData(serial=serial, source="dji-droneid")

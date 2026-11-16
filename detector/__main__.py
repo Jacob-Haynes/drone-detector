@@ -6,10 +6,7 @@ import argparse
 import asyncio
 import logging
 import os
-import random
-import struct
 import threading
-import time
 
 import uvicorn
 
@@ -56,64 +53,6 @@ def parse_args():
     return parser.parse_args()
 
 
-# ── simulator (real-format payloads, so the parsers run for real) ──
-
-def _dji_flight_reg(serial: bytes, lat: float, lon: float, alt: int, home_lat: float, home_lon: float) -> bytes:
-    raw = lambda deg: int(deg * 174533.0)  # noqa: E731
-    rec = struct.pack("<BHH16sii", 1, random.randint(0, 65535), 0x0FFF, serial.ljust(16, b"\0"),
-                      raw(lon), raw(lat))
-    rec += struct.pack("<hhhhhhhhii", alt, alt, random.randint(-800, 800), random.randint(-800, 800), 0,
-                       0, 0, random.randint(-18000, 18000), raw(home_lon), raw(home_lat))
-    rec += bytes([16, 0])
-    return bytes([0x58, 0x62, 0x13, 0x10]) + rec
-
-
-def _rid_location(lat: float, lon: float, alt: float) -> bytes:
-    enc_alt = int((alt + 1000) / 0.5)
-    msg = bytes([0x12, 0x20, random.randint(0, 179), random.randint(10, 60), 0])
-    msg += struct.pack("<iiHHH", int(lat * 1e7), int(lon * 1e7), enc_alt, enc_alt, int((40 + 1000) / 0.5))
-    return msg + bytes(6)
-
-
-def _rid_basic(serial: bytes) -> bytes:
-    return bytes([0x02, 0x12]) + serial.ljust(20, b"\0") + bytes(3)
-
-
-def run_simulator(engine: DetectionEngine):
-    """Generate fake detections for testing without hardware."""
-    base_lat, base_lon = 51.15, -1.75
-    devices = [
-        {"mac": "60:60:1F:AA:BB:CC", "ssid": "DJI-Mavic3-AABBCC", "kind": "dji"},
-        {"mac": "60:60:1F:11:22:33", "ssid": "", "kind": "dji-rc"},  # DJI controller probing
-        {"mac": "60:60:1F:44:55:66", "ssid": "OsmoAction4-5566", "kind": "ap"},  # camera, not a drone
-        {"mac": "90:3A:E6:11:22:33", "ssid": "Anafi-123456", "kind": "ap"},
-        {"mac": "E4:5F:01:AA:BB:01", "ssid": "BTHome-Hub", "kind": "ap"},
-        {"mac": "AA:BB:CC:DD:EE:02", "ssid": "Galaxy-S24", "kind": "probe"},
-        {"mac": "BLE:C0:FF:EE:00:00:01", "ssid": "", "kind": "ble-rid"},
-    ]
-    log.info("Simulator started with %d fake devices", len(devices))
-    while True:
-        dev = random.choice(devices)
-        rssi = random.randint(-85, -45)
-        frame = {"mac": dev["mac"], "rssi": rssi, "ssid": dev["ssid"], "vendor_ies": [],
-                 "frame_type": "beacon", "transport": "wifi"}
-        lat = base_lat + random.uniform(-0.01, 0.01)
-        lon = base_lon + random.uniform(-0.01, 0.01)
-        if dev["kind"] == "dji" and random.random() < 0.3:
-            frame["vendor_ies"] = [(b"\x26\x37\x12", _dji_flight_reg(b"1581F4XSIM00001", lat, lon,
-                                                                     random.randint(30, 120),
-                                                                     base_lat + 0.002, base_lon - 0.003))]
-        elif dev["kind"] in ("dji-rc", "probe"):
-            frame["frame_type"] = "probe_req"
-        elif dev["kind"] == "ble-rid":
-            from detector.parsers import remote_id
-            msg = _rid_basic(b"1596ASIMRID0001") if random.random() < 0.4 else _rid_location(lat, lon, 80.0)
-            frame.update(frame_type="ble", transport="ble",
-                         drone_data=remote_id.parse_ble_service_data(bytes([0x0D, random.randint(0, 255)]) + msg))
-        engine.process_frame(frame)
-        time.sleep(random.uniform(0.1, 0.5))
-
-
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -134,7 +73,15 @@ def main():
                          "hopper": None, "ble": None, "cot": cot}
 
     if args.simulate:
-        threading.Thread(target=run_simulator, args=(engine,), daemon=True).start()
+        from detector.simulator import DemoScenario
+
+        centre = (args.sensor_lat, args.sensor_lon) if args.sensor_lat is not None and args.sensor_lon is not None \
+            else None
+        if cot is not None and centre is None:
+            # put "probable" detections near the scenario too
+            from detector.simulator import DEFAULT_CENTRE
+            cot.sensor_lat, cot.sensor_lon = DEFAULT_CENTRE
+        threading.Thread(target=DemoScenario(engine, centre).run, daemon=True, name="sim").start()
     else:
         if not args.no_wifi:
             from detector.scanner import ChannelHopper, default_channel_plan, parse_channels, start_capture
@@ -156,6 +103,26 @@ def main():
             ble.start()
             web_module.status["ble"] = ble
 
+    from detector.heartbeat import Heartbeat
+    from detector.scanner import CAPTURE_STATE
+
+    def heartbeat_state():
+        if args.simulate:
+            return "simulate", "ok", "scripted demo scenario (SIM- callsigns)"
+        wifi = (not args.no_wifi) and CAPTURE_STATE["running"]
+        ble = web_module.status.get("ble")
+        ble_on = bool(getattr(ble, "active", False))
+        hopper = web_module.status.get("hopper")
+        parts = [f"wifi {args.interface} ch {getattr(hopper, 'current', '-')}" if wifi else
+                 f"no wifi capture{': ' + CAPTURE_STATE['error'] if CAPTURE_STATE['error'] else ''}",
+                 "ble on" if ble_on else "ble off"]
+        if cot is not None:
+            parts.append("tak connected" if cot.connected else "tak down")
+        status = "ok" if wifi and (ble_on or not args.ble) else ("degraded" if wifi or ble_on else "error")
+        return "cpu", status, "; ".join(parts)
+
+    heartbeat = Heartbeat("drone-detector", heartbeat_state, port=args.web_port).start()
+
     async def run_web():
         config = uvicorn.Config(web_module.app, host="0.0.0.0", port=args.web_port,
                                 log_level="warning", loop="asyncio")
@@ -171,6 +138,8 @@ def main():
         asyncio.run(run_web())
     except KeyboardInterrupt:
         log.info("Shutting down")
+    finally:
+        heartbeat.stop()
 
 
 if __name__ == "__main__":

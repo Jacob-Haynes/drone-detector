@@ -3,3 +3,4 @@ fastapi
 uvicorn[standard]
 websockets
 bleak
+paho-mqtt>=2.0

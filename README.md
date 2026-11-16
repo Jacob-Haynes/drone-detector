@@ -12,6 +12,25 @@ Passive drone detection for Raspberry Pi 5 using Wi-Fi (a USB adapter in monitor
 | **DJI DroneID (Wi-Fi)** | beacon vendor IE `26:37:12` | serial, position, altitude, speed, heading, home/pilot position |
 | **OUI + SSID** | beacons and probe requests | "probable drone" or "drone-related device", no position |
 
+### DJI O3 / O4 FPV builds (like the demo quad)
+
+Be clear about this in a brief: **a DJI O3 or O4 Air Unit on its own broadcasts no Remote ID**, so this detector cannot see it.
+- The air units have no GPS, no Bluetooth and no Wi-Fi radio of their own, so there is nothing to carry broadcast Remote ID. This is from FPV community sources ([IntoFPV](https://intofpv.com/printthread.php?tid=28648)). DJI's O4 FAQ does not cover Remote ID, and DJI publishes no Remote ID statement for the air units.
+- Their video link is DJI's proprietary OcuSync/O3/O4 radio on 2.4/5.8 GHz, not Wi-Fi. A monitor-mode Wi-Fi card cannot decode it. Seeing that link at all needs an SDR that covers 2.4/5.8 GHz (an RTL-SDR does not).
+- To make the FPV quad show up live, fit a **standalone broadcast Remote ID module with its own GPS**. It is then detected over Bluetooth LE with position, serial and operator data. [ArduRemoteID](https://github.com/ArduPilot/ArduRemoteID) (ESP32-S3/C3, Wi-Fi beacon/NAN and BT4/BT5) needs an ArduPilot/PX4 flight controller to feed it position over MAVLink/DroneCAN, so it does not suit a Betaflight build on its own.
+
+### Demo options, in order of hardware needed
+
+1. **No extra hardware: simulation.** `SIMULATE=1` with `SENSOR_LAT`/`SENSOR_LON` set to the demo site (in `/etc/drone-detector.env`). A scripted 5-minute scenario plays around the site:
+   - a Remote ID quad circling on Bluetooth, with its operator;
+   - a DJI Wi-Fi drone crossing;
+   - a Parrot access point ("probable");
+   - a DJI controller and an Osmo camera that are correctly *not* alarmed.
+
+   It runs through the real parsers, classifier and CoT output, and every ATAK callsign starts `SIM-`. Say on screen that it is a simulation.
+2. **No extra hardware: live Bluetooth Remote ID.** The Pi's onboard Bluetooth picks up any drone nearby that broadcasts Remote ID over Bluetooth. Many current consumer drones do when Remote ID is on (check the model), as do add-on modules. Without a Wi-Fi adapter the detector runs Bluetooth-only automatically.
+3. **USB monitor-mode Wi-Fi adapter** (e.g. Alfa AWUS036ACHM). Adds Wi-Fi beacon/NAN Remote ID, DJI Wi-Fi DroneID and the OUI/SSID classification.
+
 The limits matter when you brief what the kit can do:
 - **DJI OcuSync/O2/O3/O4 aircraft** (most current DJI drones) send DroneID on their own radio link. A Wi-Fi card cannot decode that; it needs an SDR. These aircraft *are* seen when they broadcast standard Remote ID (Wi-Fi or Bluetooth), which is mandatory in the US and EU.
 - **Analogue or digital FPV quads** without Remote ID and with no Wi-Fi are invisible to this tool. rf-spectrum is the tool for those.
@@ -72,6 +91,15 @@ Browse to `http://<pi-ip>:<WEB_PORT>` (default 8080) for the dashboard. `GET /ap
 ## ATAK Integration
 
 CoT goes over plain TCP to `TAK_HOST:TAK_PORT` (default `127.0.0.1:8087`, OpenTAKServer as set up by blufor-tracker). The sender runs in the background and reconnects with backoff. The detector starts and keeps detecting when no TAK server is up. Set `SENSOR_LAT`/`SENSOR_LON` so OUI/SSID-only detections can be placed near the sensor. Disable CoT with `--no-cot`.
+
+## Heartbeat
+
+Every 10 s the detector publishes a retained JSON message to `isrkit/heartbeat/drone-detector` for the launcher. It uses `MQTT_HOST` etc., default the Pi's broker as `guest`.
+- `ok`: Wi-Fi capture plus Bluetooth are running.
+- `degraded`: only one of them is running, e.g. no Wi-Fi adapter.
+- `error`: neither is running.
+
+The `detail` field says which, plus the channel and the TAK state. `mode` is `cpu`, or `simulate` in simulation. It publishes `stopped` on a clean exit; `HEARTBEAT=0` turns it off.
 
 ## Tests
 

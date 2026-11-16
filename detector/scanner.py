@@ -16,6 +16,9 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
+# Live capture state, for status/heartbeat
+CAPTURE_STATE = {"running": False, "error": ""}
+
 CHANNELS_24 = list(range(1, 14))
 CHANNELS_5 = [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144]
 CHANNELS_58 = [149, 153, 157, 161, 165]
@@ -187,8 +190,11 @@ def start_capture(interface: str, callback: Callable[[dict], None]):
 
     while True:
         logger.info("Starting capture on %s", interface)
+        CAPTURE_STATE.update(running=True, error="")
         try:
             sniff(iface=interface, prn=_handle_packet, store=False)
+            CAPTURE_STATE.update(running=False, error="capture stopped")
         except Exception as e:
+            CAPTURE_STATE.update(running=False, error=str(e)[:120])
             logger.error("Capture on %s failed (%s) — retrying in 10s", interface, e)
         time.sleep(10)

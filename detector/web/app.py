@@ -18,6 +18,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Set by __main__.py before starting the server
 engine = None
+status: dict = {}
 
 # Connected WebSocket clients
 _clients: set[WebSocket] = set()
@@ -40,6 +41,22 @@ async def get_alerts():
     if engine is None:
         return []
     return engine.get_alerts()
+
+
+@app.get("/api/status")
+async def get_status():
+    hopper = status.get("hopper")
+    ble = status.get("ble")
+    cot = status.get("cot")
+    return {
+        "mode": status.get("mode"),
+        "interface": status.get("interface"),
+        "channel": getattr(hopper, "current", None),
+        "hopping": hopper is not None,
+        "ble_scanning": bool(getattr(ble, "active", False)),
+        "cot_enabled": cot is not None,
+        "tak_connected": bool(getattr(cot, "connected", False)),
+    }
 
 
 @app.websocket("/ws")
@@ -69,7 +86,7 @@ async def broadcast_update():
             await ws.send_text(data)
         except Exception:
             dead.add(ws)
-    _clients -= dead
+    _clients.difference_update(dead)
 
 
 async def periodic_broadcast():

@@ -29,6 +29,7 @@
         .tag { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: bold; }
         .tag.DRONE_CONFIRMED { background: #ff0000; color: #fff; }
         .tag.DRONE_PROBABLE { background: #ff8800; color: #000; }
+        .tag.DRONE_RELATED { background: #6a4cff; color: #fff; }
         .tag.UNKNOWN_NEW { background: #ffff00; color: #000; }
         .tag.DEVICE { background: #333; color: #888; }
 
@@ -94,6 +95,8 @@
     </div>
 
     <script>
+        // SSIDs, serials and vendor strings come off the air: always escape before innerHTML
+        const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         let ws;
         function connect() {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -144,7 +147,7 @@
                 detailsDiv.innerHTML = drones.map(d => {
                     const id = d.drone_id;
                     return `<div class="drone-detail">
-                        <div class="label">SERIAL</div><div class="value">${id.serial || 'Unknown'}</div>
+                        <div class="label">SERIAL</div><div class="value">${esc(id.serial || 'Unknown')}${id.ua_type ? ' (' + esc(id.ua_type) + ')' : ''}${id.source ? ' — ' + esc(id.source) : ''}</div>
                         <div class="label">POSITION</div><div class="value">${id.drone_lat.toFixed(6)}, ${id.drone_lon.toFixed(6)} @ ${id.drone_alt.toFixed(0)}m</div>
                         <div class="label">SPEED / HEADING</div><div class="value">${id.speed.toFixed(1)} m/s / ${id.heading.toFixed(0)}°</div>
                         ${id.operator_lat ? `<div class="label">OPERATOR</div><div class="value">${id.operator_lat.toFixed(6)}, ${id.operator_lon.toFixed(6)}</div>` : ''}
@@ -162,10 +165,10 @@
                 const agoStr = ago < 60 ? `${ago}s` : `${Math.round(ago / 60)}m`;
                 const dist = d.distance_m ? `${d.distance_m}m` : '-';
                 return `<tr>
-                    <td><span class="tag ${d.classification}">${d.classification.replace('_', ' ')}</span></td>
-                    <td>${d.mac}</td>
-                    <td>${d.vendor || '-'}</td>
-                    <td>${d.ssid || '-'}</td>
+                    <td><span class="tag ${esc(d.classification)}" title="${esc(d.reason)}">${esc(d.classification.replaceAll('_', ' '))}</span></td>
+                    <td>${esc(d.mac)}</td>
+                    <td>${esc(d.vendor || '-')}</td>
+                    <td>${esc(d.ssid || '-')}</td>
                     <td>${d.rssi} dBm</td>
                     <td><span class="rssi-bar" style="width:${rssiPct}px"></span></td>
                     <td>${dist}</td>

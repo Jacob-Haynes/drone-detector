@@ -104,7 +104,9 @@ def parse_message(msg: bytes, result: DroneIDData) -> bool:
         if speed_enc != SPEED_INVALID:
             result.speed = speed_enc * 0.75 + 255 * 0.25 if speed_mult else speed_enc * 0.25
         if direction < DIRECTION_INVALID:
-            result.heading = float(direction % 360)
+            result.heading = float(direction % 360)  # Remote ID "direction" is track over ground
+            if speed_enc != SPEED_INVALID:
+                result.course, result.velocity_valid = result.heading, True
         return True
 
     if msg_type == MSG_SELF_ID:

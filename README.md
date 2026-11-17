@@ -88,6 +88,19 @@ python -m detector --no-wifi                              # BLE Remote ID only
 
 Browse to `http://isr-pi.local:8060` (`WEB_PORT`, default 8060) for the dashboard. `GET /api/status` shows the current channel, BLE state and TAK connection.
 
+### Direction of travel
+
+Each drone shows its course and whether it is coming towards the OP, e.g. `1.3 km NE · 225° ↙ Closing · CPA 120 m in 02:46`. The maths is in `detector/motion.py`.
+
+- **Course and speed.** The broadcast track is used when there is one: Remote ID track direction and ground speed, or DJI velocity north/east. DJI yaw is not used, because it is where the nose points, not the direction of travel. Otherwise they are worked out from position fixes at least 5 s or 10 m apart.
+- **Relative to the OP** (`SENSOR_LAT/LON`). The radial speed is the velocity component along the line from the OP. Below −1 m/s is **Closing**, above +1 m/s is **Opening**, in between is **Crossing**. Below 1 m/s ground speed is **Hovering**. The label uses the median of the last 5 fixes, so it doesn't flicker.
+- **CPA.** When closing, the page shows the closest point of approach on the current straight-line track: the distance and the time to it.
+- **No position (signal strength only).** These show `Closing~` or `Opening~` from a clear RSSI trend over 20 s, otherwise `–`. They never show a course.
+- **Order and colour.** Closing drones are listed first, then the rest by distance. Closing is the brass alert state.
+- **Where it goes.** The CoT marker carries `<track course speed>`, so ATAK draws the heading. Mesh alerts end with e.g. `hdg 225 closing`.
+
+The simulator flies one drone inbound with a 120 m CPA, one orbiting the OP at 600 m (crossing) and one outbound.
+
 ## ATAK Integration
 
 CoT goes over TCP to `TAK_HOST:TAK_PORT` (default `127.0.0.1:8087`, OpenTAKServer as set up by blufor-tracker) through `detector/tak_client.py` (kit contract v5). It keeps one connection open. 3 s after each connect it registers the sensor as `isrkit-drone-detector-<ISR_HOST>`, callsign `DRONE-DET <ISR_HOST>`, at `SENSOR_LAT/LON`, and re-sends that every 60 s. Only then does it send markers, all on that connection. Real OpenTAKServer on PostgreSQL drops CoT from a sender with no EUD row, only relays to a connection that registered after OTS's internal channel opened, and needs unique callsigns. The sender runs in the background and reconnects with backoff. The detector starts and keeps detecting when no TAK server is up. Set `SENSOR_LAT`/`SENSOR_LON` (the shared OP position) so OUI/SSID-only detections can be placed near the sensor. Without it they are not put on the map (never at 0,0), and the dashboard and heartbeat say "position not set". Disable CoT with `--no-cot`.

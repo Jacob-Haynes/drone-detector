@@ -14,6 +14,10 @@
   .dd-id { min-width: 220px; }
   .dd-where { font-size: 20px; min-width: 170px; }
   .dd-when { margin-left: auto; }
+  .dd-drones .dd-motion { min-width: 330px; }
+  .dd-rel.closing { color: var(--accent); }
+  .dd-rel { color: var(--muted); }
+  .dd-arrow { display: inline-block; width: 1em; text-align: center; }
   .dd-kind { font-size: 13px; color: var(--muted); }
   table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 8px; }
   th { text-align: left; color: var(--muted); font: 500 14px/1.2 var(--label); letter-spacing: .04em; padding: 6px 8px; border-bottom: 1px solid var(--line); }
@@ -38,9 +42,10 @@
       <div class="dd-count"><span class="isr-big" id="count">0</span><span class="isr-tag sim" id="sim-tag" hidden>SIM</span></div>
       <div class="isr-muted" id="count-note">Listening</div>
     </div>
-    <div class="isr-card">
+    <div class="isr-card" id="nearest-card">
       <h2>Nearest</h2>
       <div class="isr-big" id="nearest">None</div>
+      <div class="dd-motion" id="nearest-motion"></div>
       <div class="isr-muted" id="nearest-note">Distance and bearing from the OP</div>
     </div>
   </div>
@@ -93,21 +98,36 @@
     return {m: Infinity, text: 'Range unknown', est: true};
   }
 
+  // "225° ↑ Closing · CPA 120 m in 01:40" (arrow turned to the course); RSSI-only: "Closing~", no course
+  function motionHtml(m) {
+    if (!m) return '';
+    const rel = m.relation ? `<span class="dd-rel ${esc(m.relation)}">${esc(m.label)}</span>` : '<span class="dd-rel">–</span>';
+    if (m.course == null || m.relation === 'hovering') return rel;
+    return `${esc(m.course_text)} <span class="dd-arrow" style="transform: rotate(${Number(m.course)}deg)" ` +
+      `aria-label="course ${esc(m.course_text)}">↑</span> ${rel}`;
+  }
+
   function render(data) {
     last = data;
     const devices = data.devices || [];
     const sim = st.mode === 'simulate';
     const drones = devices.filter(d => DRONE.includes(d.classification) || d.drone_id);
     document.getElementById('count').textContent = String(drones.length).padStart(2, '0');
-    document.getElementById('count-card').className = drones.length ? 'isr-card alert' : 'isr-card';
     document.getElementById('sim-tag').hidden = !sim;
     const confirmed = drones.filter(d => d.classification === 'DRONE_CONFIRMED').length;
     document.getElementById('count-note').textContent =
       drones.length ? `${confirmed} confirmed, ${drones.length - confirmed} probable` : 'Listening';
 
-    const located = drones.map(d => [d, where(d)]).sort((a, b) => a[1].m - b[1].m);
-    const near = located[0];
+    // Closing first (soonest CPA first), then by distance
+    const closing = (d) => (d.motion || {}).relation === 'closing';
+    const located = drones.map(d => [d, where(d)]).sort((a, b) =>
+      (closing(b[0]) - closing(a[0])) || (a[1].m - b[1].m));
+    const anyClosing = drones.some(closing);
+    document.getElementById('count-card').className = anyClosing ? 'isr-card alert' : 'isr-card';
+    const near = located.reduce((best, x) => (!best || x[1].m < best[1].m ? x : best), null);  // by distance only
     document.getElementById('nearest').textContent = near ? near[1].text : 'None';
+    document.getElementById('nearest-card').className = near && closing(near[0]) ? 'isr-card alert' : 'isr-card';
+    document.getElementById('nearest-motion').innerHTML = near ? motionHtml(near[0].motion) : '';
     document.getElementById('nearest-note').textContent = near
       ? (near[1].est ? 'Estimated from signal strength' : 'Distance and bearing from the OP')
       : 'Distance and bearing from the OP';
@@ -117,11 +137,13 @@
       const id = d.drone_id || {};
       const [kind, aff] = KIND[d.classification] || ['Related', 'unknown'];
       const name = id.serial || d.ssid || d.mac;
+      const m = d.motion || {};
       const extra = d.drone_id
-        ? `${Math.round(id.drone_alt || 0)} m alt, ${(id.speed || 0).toFixed(0)} m/s` : (d.vendor || '');
+        ? `${Math.round(id.drone_alt || 0)} m alt` + (m.speed != null ? `, ${m.speed.toFixed(0)} m/s` : '') : (d.vendor || '');
       return `<li>
         <span class="dd-id"><span class="aff ${aff}"></span>${esc(name)}<br><span class="dd-kind">${kind}${id.ua_type ? ' · ' + esc(id.ua_type) : ''}</span></span>
         <span class="dd-where">${esc(w.text)}</span>
+        <span class="dd-motion">${motionHtml(m)}</span>
         <span class="isr-muted">${esc(extra)}${id.operator_lat ? ' · operator located' : ''}</span>
         <span class="dd-when isr-muted">${ago(d.last_seen)}</span>
         ${sim ? '<span class="isr-tag sim">SIM</span>' : ''}

@@ -53,6 +53,7 @@ class DetectionEngine:
         self._on_alert = on_alert
         self._last_alert: dict[str, float] = {}
         self._last_cleanup = time()
+        self.op: tuple[float, float] | None = None  # OP position (SENSOR_LAT/LON) for motion
 
     @property
     def devices(self) -> dict[str, DetectedDevice]:
@@ -101,6 +102,11 @@ class DetectionEngine:
                     device.drone_id.merge(drone_data)
                 device.classification = Classification.DRONE_CONFIRMED
                 device.reason = f"decoded {drone_data.source or 'drone ID'} broadcast"
+                if drone_data.has_position:  # a fix for course/speed/CPA (detector.motion)
+                    bc = drone_data.velocity_valid
+                    device.track.add_fix(now, drone_data.drone_lat, drone_data.drone_lon,
+                                         course=drone_data.course if bc else None,
+                                         speed=drone_data.speed if bc else None)
             elif device.classification != Classification.DRONE_CONFIRMED:
                 verdict = oui.assess(mac, ssid or device.ssid, frame_type)
                 if verdict:
@@ -142,7 +148,7 @@ class DetectionEngine:
     def get_active_devices(self) -> list[dict]:
         """Return active devices as dicts, sorted by classification priority."""
         with self._lock:
-            active = [d.to_dict() for d in self._devices.values() if d.is_active]
+            active = [d.to_dict(self.op) for d in self._devices.values() if d.is_active]
         active.sort(key=lambda d: (_RANK.get(Classification(d["classification"]), 99), -d["last_seen"]))
         return active
 
@@ -150,7 +156,7 @@ class DetectionEngine:
         """Return confirmed and probable drone detections."""
         with self._lock:
             return [
-                d.to_dict()
+                d.to_dict(self.op)
                 for d in self._devices.values()
                 if d.is_active
                 and d.classification in (Classification.DRONE_CONFIRMED, Classification.DRONE_PROBABLE)

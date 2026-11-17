@@ -33,8 +33,14 @@ SETTLE_S = 5.0  # wait this long after the first frame so serial and position ha
 SIM_PREFIX = "[SIM] "
 
 
-def describe(device: DetectedDevice) -> str:
-    """Short one-detection summary for a mesh text."""
+def describe(device: DetectedDevice, op: tuple[float, float] | None = None) -> str:
+    """Short one-detection summary for a mesh text, ending "hdg 225 closing" when known."""
+    motion = device.motion(op).mesh_text()
+    tail = f" {motion}" if motion else ""
+    return _describe(device) + tail
+
+
+def _describe(device: DetectedDevice) -> str:
     d = device.drone_id
     if device.classification == Classification.DRONE_CONFIRMED:
         name = (d.serial if d and d.serial else device.mac[-5:])[-8:]
@@ -51,14 +57,14 @@ def describe(device: DetectedDevice) -> str:
     return f"probable UAV {what}" + (f" ~{dist:.0f}m" if dist else "")
 
 
-def build_text(items: list[DetectedDevice], simulated: bool) -> str:
+def build_text(items: list[DetectedDevice], simulated: bool, op: tuple[float, float] | None = None) -> str:
     prefix = (SIM_PREFIX if simulated else "") + "DRONE: "
     confirmed = sum(1 for i in items if i.classification == Classification.DRONE_CONFIRMED)
     head = f"{len(items)} new: " if len(items) > 1 else ""
     text = prefix + head
     shown = 0
     for dev in sorted(items, key=lambda i: i.classification != Classification.DRONE_CONFIRMED):
-        part = describe(dev)
+        part = describe(dev, op)
         rest = len(items) - shown - 1
         tail = f"; +{rest} more" if rest else ""
         candidate = text + ("; " if shown else "") + part
@@ -86,6 +92,7 @@ class MeshAlerter:
         self._last_sent: float | None = None
         self.sent = 0
         self._running = False
+        self.op: tuple[float, float] | None = None  # OP position, for "hdg 225 closing"
 
     def note(self, device: DetectedDevice):
         if device.classification not in (Classification.DRONE_CONFIRMED, Classification.DRONE_PROBABLE):
@@ -116,7 +123,7 @@ class MeshAlerter:
             if len(self._seen) > 2000:
                 for mac in [m for m, (_, t) in self._seen.items() if now - t > FORGET_S]:
                     del self._seen[mac]
-        text = build_text(items, self.simulated)
+        text = build_text(items, self.simulated, self.op)
         try:
             self._publish(text)
             self.sent += 1

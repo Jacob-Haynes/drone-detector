@@ -92,6 +92,13 @@ class CotEmitter:
                 parts.append(d.description)
         prefix = SIM_REMARKS if self.simulated else ""
         dist = device.distance_estimate_m
+        op = (self.sensor_lat, self.sensor_lon) if self.sensor_lat is not None and self.sensor_lon is not None \
+            else None
+        motion = device.motion(op, now)
+        if motion.course is not None:
+            parts.append(f"course {motion.course_text} {motion.speed:.1f} m/s")
+        if motion.relation:
+            parts.append(motion.label.replace("·", "-") + " (relative to the OP)")
 
         if d and d.has_position:
             lat, lon, hae, ce = d.drone_lat, d.drone_lon, d.drone_alt, 15.0
@@ -105,9 +112,9 @@ class CotEmitter:
             logger.debug("No position for %s and no SENSOR_LAT/LON set — not sending CoT", device.mac)
             return []
 
-        track = {}
-        if d and (d.speed or d.heading):
-            track = {"speed": d.speed, "course": d.heading}
+        track = {}  # ATAK draws the heading from <track course speed>: direction of travel, not yaw
+        if motion.course is not None and d and d.has_position:
+            track = {"speed": motion.speed, "course": motion.course}
         # tak_client.marker: parent link to this tool's registered uid, so OTS also stores it
         # (OTS web map); see tak_client's module docstring for the fields OTS requires
         uav = self.client.marker(uid, f"a-{aff}-A-M-F-Q", callsign, lat, lon, now=now, stale_s=STALE_SECONDS,

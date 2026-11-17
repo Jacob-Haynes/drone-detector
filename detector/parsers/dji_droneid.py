@@ -121,6 +121,9 @@ def _parse_flight_reg(rec: bytes) -> DroneIDData | None:
     speed = math.hypot(vn, ve) / 100.0
     if speed < 100:  # >100 m/s means we decoded garbage
         data.speed = speed
+        data.velocity_valid = True
+        if speed > 0.5:
+            data.course = math.degrees(math.atan2(ve, vn)) % 360  # track, not yaw
     if yaw is not None and -18000 <= yaw <= 18000:
         data.heading = (yaw / 100.0) % 360
     elif data.speed > 0.5:

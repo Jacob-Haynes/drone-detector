@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from time import time
 
+from detector.motion import Motion, MotionTrack, rssi_motion
+
 
 class Classification(Enum):
     DRONE_CONFIRMED = "DRONE_CONFIRMED"  # decoded DroneID / Remote ID broadcast
@@ -32,6 +34,10 @@ class DroneIDData:
     ua_type: str = ""
     description: str = ""
     source: str = ""  # dji-droneid | remoteid-wifi-beacon | remoteid-wifi-nan | remoteid-ble
+    # Track over the ground as broadcast (Remote ID track direction; DJI velocity N/E). Unlike
+    # ``heading`` (DJI yaw: where the nose points), this is the direction of travel.
+    course: float = 0.0
+    velocity_valid: bool = False  # speed (and course, if speed > 0.5 m/s) came in the broadcast
 
     @property
     def has_position(self) -> bool:
@@ -44,8 +50,14 @@ class DroneIDData:
     def merge(self, other: "DroneIDData") -> None:
         """Fill fields from a newer partial message (Remote ID sends BasicID and Location separately)."""
         for name, value in vars(other).items():
+            if name in ("speed", "course", "velocity_valid"):
+                continue
             if value not in ("", 0.0, 0):
                 setattr(self, name, value)
+        if other.velocity_valid:  # 0 m/s and 000° are real values here
+            self.speed, self.course, self.velocity_valid = other.speed, other.course, True
+        elif other.speed:
+            self.speed = other.speed
 
 
 @dataclass
@@ -64,6 +76,7 @@ class DetectedDevice:
     frame_count: int = 0
     reason: str = ""  # why it got its classification (shown in UI and CoT remarks)
     transport: str = "wifi"  # wifi | ble
+    track: MotionTrack = field(default_factory=MotionTrack, repr=False)  # position fixes for course/CPA
 
     def update_rssi(self, rssi: int):
         now = time()
@@ -87,12 +100,20 @@ class DetectedDevice:
         n = 2.5
         return 10 ** ((tx_power - ref_loss_1m - self.rssi) / (10 * n))
 
+    def motion(self, op: tuple[float, float] | None = None, now: float | None = None) -> Motion:
+        """Course, speed and closing/opening relative to the OP (see detector.motion). From the
+        position fixes when the drone broadcasts a position, else the RSSI trend (no course)."""
+        if self.drone_id and self.drone_id.has_position and self.track.fixes:
+            return self.track.summary(op)
+        return rssi_motion(self.rssi_history, time() if now is None else now)
+
     @property
     def is_active(self) -> bool:
         return (time() - self.last_seen) < 60
 
-    def to_dict(self) -> dict:
+    def to_dict(self, op: tuple[float, float] | None = None) -> dict:
         return {
+            "motion": self.motion(op).to_dict(),
             "mac": self.mac,
             "vendor": self.vendor,
             "ssid": self.ssid,
@@ -118,6 +139,7 @@ class DetectedDevice:
                 "operator_id": self.drone_id.operator_id,
                 "ua_type": self.drone_id.ua_type,
                 "source": self.drone_id.source,
+                "course": self.drone_id.course if self.drone_id.velocity_valid else None,
             }
             if self.drone_id
             else None,

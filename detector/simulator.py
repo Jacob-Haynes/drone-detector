@@ -2,10 +2,13 @@
 
 A 5-minute loop centred on the sensor (``SENSOR_LAT/LON``, else Salisbury Plain):
 
-* t=20-280 s  **Remote ID quad** on Bluetooth LE: circles 250 m around a point ~600 m NE,
-  80 m up, with its operator standing still. Shows serial, UA type, operator position and ID.
-* t=60-300 s  **DJI Wi-Fi drone** (DJI DroneID beacons): crosses W→E ~300 m north at 12 m/s,
-  with home and pilot position. A DJI controller probes nearby while it flies.
+* t=20-280 s  **Remote ID quad, inbound** on Bluetooth LE: flies from ~2 km NE towards the OP
+  at 8 m/s on course 225°, passing 120 m from it (closing, with a CPA), 80 m up, its operator
+  standing still. Shows serial, UA type, operator position and ID.
+* t=60-300 s  **DJI Wi-Fi drone, crossing** (DJI DroneID beacons): orbits the OP at 600 m,
+  12 m/s anticlockwise, with home and pilot position. A DJI controller probes nearby.
+* t=30-290 s  **Remote ID quad, outbound** on Bluetooth LE: leaves from 200 m S of the OP on
+  course 200° at 10 m/s (opening).
 * t=120-240 s **Parrot access point** with no Remote ID: "probable" only, placed at the sensor.
 * always      a DJI Osmo camera and a DJI controller ("drone-related", never alerted) plus
   background phones and routers.
@@ -103,12 +106,13 @@ class DemoScenario:
     def tick(self, now: float | None = None):
         t = ((now or time.time()) - self.t0) % PERIOD_S
 
-        # Remote ID quad over BLE: circle around a point ~600 m NE
+        # Remote ID quad over BLE, inbound: from ~2 km NE towards the OP, CPA 120 m
         if 20 <= t < 280:
-            cx, cy, r = 420.0, 420.0, 250.0
-            ang = (t - 20) * (8.0 / r)  # 8 m/s along the circle
-            east, north = cx + r * math.cos(ang), cy + r * math.sin(ang)
-            heading = (math.degrees(math.atan2(-math.sin(ang), math.cos(ang))) + 360) % 360  # tangent, CCW
+            heading, speed = 225.0, 8.0
+            ve, vn = speed * math.sin(math.radians(heading)), speed * math.cos(math.radians(heading))
+            # start 2 km out along 045°, shifted 120 m sideways so it misses the OP by 120 m
+            east = 1414.0 + 85.0 + ve * (t - 20)
+            north = 1414.0 - 85.0 + vn * (t - 20)
             lat, lon = offset(self.lat0, self.lon0, east, north)
             op_lat, op_lon = offset(self.lat0, self.lon0, 700, 650)
             msg = random.choice([rid_basic(b"1581F5BKD23C0042"), rid_location(lat, lon, 80, heading, 8.0),
@@ -119,13 +123,17 @@ class DemoScenario:
                         "drone_data": remote_id.parse_ble_service_data(bytes([0x0D, int(t) % 256]) + msg)},
                        probability=0.5)
 
-        # DJI Wi-Fi drone crossing W -> E, 300 m north, 12 m/s
+        # DJI Wi-Fi drone, crossing: orbits the OP at 600 m, 12 m/s anticlockwise
         if 60 <= t < 300:
-            east, north = -1440.0 + (t - 60) * 12.0, 300.0
+            r, speed = 600.0, 12.0
+            ang = math.radians(150) + (t - 60) * speed / r
+            east, north = r * math.cos(ang), r * math.sin(ang)
+            ve, vn = -speed * math.sin(ang), speed * math.cos(ang)  # tangent
             lat, lon = offset(self.lat0, self.lon0, east, north)
             home = offset(self.lat0, self.lon0, -1500, 280)
             app = offset(self.lat0, self.lon0, -1490, 270)
-            ie = dji_flight_reg_v2(b"08QDE5K0010042", lat, lon, 60, 0.0, 12.0, 90.0, app, home)
+            ie = dji_flight_reg_v2(b"08QDE5K0010042", lat, lon, 60, vn, ve,
+                                   math.degrees(math.atan2(ve, vn)) % 360, app, home)
             self._emit({"mac": "60:60:1F:5A:21:C4", "rssi": rssi_at(math.hypot(east, north)),
                         "ssid": "DJI-MAVICAIR-5A21C4", "frame_type": "beacon",
                         "vendor_ies": [(b"\x26\x37\x12", ie)], "transport": "wifi"}, probability=0.6)
@@ -134,7 +142,20 @@ class DemoScenario:
                         "ssid": "", "frame_type": "probe_req", "vendor_ies": [], "transport": "wifi"},
                        probability=0.1)
 
-        # Parrot AP, no Remote ID: probable only
+        # Remote ID quad over BLE, outbound: from 200 m S of the OP, course 200°, 10 m/s
+        if 30 <= t < 290:
+            heading, speed = 200.0, 10.0
+            ve, vn = speed * math.sin(math.radians(heading)), speed * math.cos(math.radians(heading))
+            east, north = ve * (t - 30), -200.0 + vn * (t - 30)
+            lat, lon = offset(self.lat0, self.lon0, east, north)
+            msg = random.choice([rid_basic(b"1581F5FKD2B10099"), rid_location(lat, lon, 60, heading, speed),
+                                 rid_location(lat, lon, 60, heading, speed)])
+            self._emit({"mac": "BLE:C4:2D:91:07:5E:13", "rssi": rssi_at(math.hypot(east, north)) - 10,
+                        "ssid": "", "frame_type": "ble", "vendor_ies": [], "transport": "ble",
+                        "drone_data": remote_id.parse_ble_service_data(bytes([0x0D, int(t) % 256]) + msg)},
+                       probability=0.5)
+
+        # Parrot AP, no Remote ID: probable only (signal rises then falls: closing~ then opening~)
         if 120 <= t < 240:
             d = 150 + abs(t - 180) * 6
             self._emit({"mac": "90:3A:E6:41:0C:7E", "rssi": rssi_at(d), "ssid": "Anafi-410C7E",

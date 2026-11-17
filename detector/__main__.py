@@ -134,6 +134,13 @@ def main():
         web_module.status["sensor_position"] = (args.sensor_lat, args.sensor_lon)
     else:
         log.warning("SENSOR_LAT/SENSOR_LON not set: detections without GPS are not put on the map")
+    op = web_module.status["sensor_position"]
+    if op is None and args.simulate:
+        from detector.simulator import DEFAULT_CENTRE
+        op = DEFAULT_CENTRE
+    engine.op = op  # closing/opening and CPA are relative to the OP
+    if mesh is not None:
+        mesh.op = op
 
     from detector.heartbeat import Heartbeat
     from detector.scanner import CAPTURE_STATE

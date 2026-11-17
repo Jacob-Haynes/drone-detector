@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="/static/isr-ui.css?v=2">
 <script src="/static/isr-ui.js?v=2"></script>
 <style>
+  [hidden] { display: none !important; }  /* .isr-tag is inline-block: keep the SIM tag hidden when hidden */
   .dd-top { display: grid; gap: var(--gap); grid-template-columns: 1fr 2fr; margin-bottom: var(--gap); }
   .dd-count { display: flex; align-items: baseline; gap: 12px; }
   .dd-count .isr-big { font-size: 72px; }
@@ -195,8 +196,7 @@
     if (demo.mode === 'on_demand' && card.previousElementSibling) {  // step by step: first thing on the page
       document.querySelector('main').prepend(card);
     }
-    const names = Object.fromEntries(demo.scenarios.map(s => [s.id, s.label]));
-    const running = (demo.active || []).map(id => names[id] || id);
+    const running = demo.active || [];  // scenario ids: inbound, swarm …
     document.getElementById('demo-note').textContent = demoMsg ||
       (running.length ? `Running: ${running.join(', ')}. Simulated, labelled SIM here and on ATAK.`
         : 'Each button flies simulated drones, labelled SIM here and on ATAK.');

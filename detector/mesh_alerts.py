@@ -2,6 +2,8 @@
 
 Contract C4.4: at most one mesh text per ``MIN_INTERVAL_S`` (30 s) from this tool. Detections
 that arrive in between are aggregated into the next text. C4.3: simulated texts start ``[SIM] ``.
+Simulated (demo) and real detections never share a text: real ones go first, the simulated ones
+wait for the next interval.
 
 A detection is "new" the first time a device is seen as DRONE_CONFIRMED or DRONE_PROBABLE, when it
 upgrades from probable to confirmed, or when it comes back after ``FORGET_S`` of silence. Periodic
@@ -117,13 +119,14 @@ class MeshAlerter:
                 return None
             if now - min(t for _, t in self._pending.values()) < SETTLE_S:
                 return None
-            items = [d for d, _ in self._pending.values()]
-            self._pending.clear()
+            real = [m for m, (d, _) in self._pending.items() if not d.simulated]
+            macs = real if (real and not self.simulated) else list(self._pending)
+            items = [self._pending.pop(m)[0] for m in macs]
             self._last_sent = now
             if len(self._seen) > 2000:
                 for mac in [m for m, (_, t) in self._seen.items() if now - t > FORGET_S]:
                     del self._seen[mac]
-        text = build_text(items, self.simulated, self.op)
+        text = build_text(items, self.simulated or all(d.simulated for d in items), self.op)
         try:
             self._publish(text)
             self.sent += 1
@@ -131,6 +134,12 @@ class MeshAlerter:
         except Exception:
             logger.exception("Mesh alert publish failed")
         return text
+
+    def forget(self, macs):
+        """Drop pending texts for these devices (demo clear)."""
+        with self._lock:
+            for mac in macs:
+                self._pending.pop(mac, None)
 
     def start(self) -> "MeshAlerter":
         self._running = True

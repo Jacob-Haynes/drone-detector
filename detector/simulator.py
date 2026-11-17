@@ -25,6 +25,8 @@ import math
 import random
 import struct
 import time
+from dataclasses import dataclass
+from typing import Callable
 
 from detector.engine import DetectionEngine
 from detector.parsers import remote_id
@@ -59,12 +61,12 @@ def dji_flight_reg_v2(serial: bytes, lat, lon, alt, speed_n, speed_e, yaw_deg, a
     return bytes([0x58, 0x62, 0x13, 0x10]) + rec
 
 
-def rid_location(lat, lon, alt, heading, speed) -> bytes:
+def rid_location(lat, lon, alt, heading, speed, airborne: bool = True) -> bytes:
     ew = heading >= 180
     direction = int(heading - 180 if ew else heading)
     speed_enc = min(int(speed / 0.25), 254)
     enc = lambda a: int((a + 1000) / 0.5)  # noqa: E731
-    msg = bytes([0x12, 0x20 | (0x02 if ew else 0), direction, speed_enc, 0])
+    msg = bytes([0x12, (0x20 if airborne else 0x10) | (0x02 if ew else 0), direction, speed_enc, 0])
     msg += struct.pack("<iiHHH", int(lat * 1e7), int(lon * 1e7), enc(alt - 5), enc(alt), enc(alt - 10))
     return msg + bytes(6)
 
@@ -81,7 +83,89 @@ def rid_operator(op_id: bytes) -> bytes:
     return bytes([0x52, 0x00]) + op_id.ljust(20, b"\0") + bytes(3)
 
 
-# ── scenario ──────────────────────────────────────────────────────
+# ── flight models (shared by the continuous loop and the on-demand demo, detector.demo) ──
+
+Emit = Callable[[dict, float], None]  # (frame, probability)
+
+
+@dataclass
+class RemoteIdFlight:
+    """A Remote ID quad over Bluetooth LE on a straight line from ``start`` (east, north metres
+    from the OP) at ``heading``/``speed``. With ``stop_after_s`` it stops there, comes down at
+    ``descent_mps`` and keeps broadcasting from the ground (status "on ground")."""
+
+    mac: str
+    serial: bytes
+    start: tuple[float, float]
+    heading: float
+    speed: float
+    alt: float
+    operator: tuple[float, float] | None = None  # east, north of the pilot (Remote ID System message)
+    operator_id: bytes | None = None
+    stop_after_s: float | None = None
+    descent_mps: float = 2.5
+    probability: float = 0.5
+
+    def state(self, t: float) -> tuple[float, float, float, float, bool]:
+        """(east, north, alt, speed, airborne) ``t`` seconds into the flight."""
+        flying = t if self.stop_after_s is None else min(t, self.stop_after_s)
+        rad = math.radians(self.heading)
+        east = self.start[0] + self.speed * math.sin(rad) * flying
+        north = self.start[1] + self.speed * math.cos(rad) * flying
+        if self.stop_after_s is None or t <= self.stop_after_s:
+            return east, north, self.alt, self.speed, True
+        alt = max(0.0, self.alt - self.descent_mps * (t - self.stop_after_s))
+        return east, north, alt, 0.0, alt > 0
+
+    def tick(self, t: float, centre: tuple[float, float], emit: Emit, seq: int):
+        east, north, alt, speed, airborne = self.state(t)
+        lat, lon = offset(centre[0], centre[1], east, north)
+        msgs = [rid_basic(self.serial), rid_location(lat, lon, alt, self.heading, speed, airborne),
+                rid_location(lat, lon, alt, self.heading, speed, airborne)]
+        if self.operator is not None:
+            msgs.append(rid_system(*offset(centre[0], centre[1], *self.operator)))
+        if self.operator_id:
+            msgs.append(rid_operator(self.operator_id))
+        msg = random.choice(msgs)
+        emit({"mac": self.mac, "rssi": rssi_at(math.hypot(east, north)) - 10,
+              "ssid": "", "frame_type": "ble", "vendor_ies": [], "transport": "ble", "simulated": True,
+              "drone_data": remote_id.parse_ble_service_data(bytes([0x0D, seq % 256]) + msg)},
+             self.probability)
+
+
+@dataclass
+class DjiOrbit:
+    """A DJI Wi-Fi drone (DroneID beacons) orbiting the OP anticlockwise, with home and pilot
+    positions, and its controller probing from the pilot's position."""
+
+    mac: str
+    serial: bytes
+    ssid: str
+    controller_mac: str
+    radius: float = 600.0
+    speed: float = 12.0
+    start_deg: float = 150.0
+    alt: float = 60.0
+    home: tuple[float, float] = (-1500.0, 280.0)
+    pilot: tuple[float, float] = (-1490.0, 270.0)
+
+    def tick(self, t: float, centre: tuple[float, float], emit: Emit):
+        ang = math.radians(self.start_deg) + t * self.speed / self.radius
+        east, north = self.radius * math.cos(ang), self.radius * math.sin(ang)
+        ve, vn = -self.speed * math.sin(ang), self.speed * math.cos(ang)  # tangent
+        lat, lon = offset(centre[0], centre[1], east, north)
+        home = offset(centre[0], centre[1], *self.home)
+        app = offset(centre[0], centre[1], *self.pilot)
+        ie = dji_flight_reg_v2(self.serial, lat, lon, self.alt, vn, ve,
+                               math.degrees(math.atan2(ve, vn)) % 360, app, home)
+        emit({"mac": self.mac, "rssi": rssi_at(math.hypot(east, north)),
+              "ssid": self.ssid, "frame_type": "beacon", "simulated": True,
+              "vendor_ies": [(b"\x26\x37\x12", ie)], "transport": "wifi"}, 0.6)
+        emit({"mac": self.controller_mac, "rssi": rssi_at(math.hypot(*self.pilot)), "simulated": True,
+              "ssid": "", "frame_type": "probe_req", "vendor_ies": [], "transport": "wifi"}, 0.1)
+
+
+# ── continuous scenario (--simulate, DEMO_MODE=continuous) ────────
 
 BACKGROUND = [
     ("E4:5F:01:3C:11:02", "BTHome-7Q2X", "beacon", 120),
@@ -91,6 +175,12 @@ BACKGROUND = [
     ("C8:3A:35:10:22:7B", "Tenda_22C7", "beacon", 300),
     ("5E:10:AB:03:FF:12", "", "probe_req", 60),
 ]
+
+# start 2 km out along 045°, shifted 120 m sideways so it misses the OP by 120 m
+INBOUND = RemoteIdFlight("BLE:E1:7A:3C:90:22:41", b"1581F5BKD23C0042", (1414.0 + 85.0, 1414.0 - 85.0),
+                         225.0, 8.0, 80.0, operator=(700.0, 650.0), operator_id=b"GBR-OP-SIMDEMO01")
+ORBIT = DjiOrbit("60:60:1F:5A:21:C4", b"08QDE5K0010042", "DJI-MAVICAIR-5A21C4", "60:60:1F:5A:21:C5")
+OUTBOUND = RemoteIdFlight("BLE:C4:2D:91:07:5E:13", b"1581F5FKD2B10099", (0.0, -200.0), 200.0, 10.0, 60.0)
 
 
 class DemoScenario:
@@ -105,68 +195,27 @@ class DemoScenario:
 
     def tick(self, now: float | None = None):
         t = ((now or time.time()) - self.t0) % PERIOD_S
+        centre = (self.lat0, self.lon0)
 
-        # Remote ID quad over BLE, inbound: from ~2 km NE towards the OP, CPA 120 m
-        if 20 <= t < 280:
-            heading, speed = 225.0, 8.0
-            ve, vn = speed * math.sin(math.radians(heading)), speed * math.cos(math.radians(heading))
-            # start 2 km out along 045°, shifted 120 m sideways so it misses the OP by 120 m
-            east = 1414.0 + 85.0 + ve * (t - 20)
-            north = 1414.0 - 85.0 + vn * (t - 20)
-            lat, lon = offset(self.lat0, self.lon0, east, north)
-            op_lat, op_lon = offset(self.lat0, self.lon0, 700, 650)
-            msg = random.choice([rid_basic(b"1581F5BKD23C0042"), rid_location(lat, lon, 80, heading, 8.0),
-                                 rid_location(lat, lon, 80, heading, 8.0), rid_system(op_lat, op_lon),
-                                 rid_operator(b"GBR-OP-SIMDEMO01")])
-            self._emit({"mac": "BLE:E1:7A:3C:90:22:41", "rssi": rssi_at(math.hypot(east, north)) - 10,
-                        "ssid": "", "frame_type": "ble", "vendor_ies": [], "transport": "ble",
-                        "drone_data": remote_id.parse_ble_service_data(bytes([0x0D, int(t) % 256]) + msg)},
-                       probability=0.5)
-
-        # DJI Wi-Fi drone, crossing: orbits the OP at 600 m, 12 m/s anticlockwise
-        if 60 <= t < 300:
-            r, speed = 600.0, 12.0
-            ang = math.radians(150) + (t - 60) * speed / r
-            east, north = r * math.cos(ang), r * math.sin(ang)
-            ve, vn = -speed * math.sin(ang), speed * math.cos(ang)  # tangent
-            lat, lon = offset(self.lat0, self.lon0, east, north)
-            home = offset(self.lat0, self.lon0, -1500, 280)
-            app = offset(self.lat0, self.lon0, -1490, 270)
-            ie = dji_flight_reg_v2(b"08QDE5K0010042", lat, lon, 60, vn, ve,
-                                   math.degrees(math.atan2(ve, vn)) % 360, app, home)
-            self._emit({"mac": "60:60:1F:5A:21:C4", "rssi": rssi_at(math.hypot(east, north)),
-                        "ssid": "DJI-MAVICAIR-5A21C4", "frame_type": "beacon",
-                        "vendor_ies": [(b"\x26\x37\x12", ie)], "transport": "wifi"}, probability=0.6)
-            # its controller, probing from the pilot's position
-            self._emit({"mac": "60:60:1F:5A:21:C5", "rssi": rssi_at(math.hypot(-1490, 270)),
-                        "ssid": "", "frame_type": "probe_req", "vendor_ies": [], "transport": "wifi"},
-                       probability=0.1)
-
-        # Remote ID quad over BLE, outbound: from 200 m S of the OP, course 200°, 10 m/s
-        if 30 <= t < 290:
-            heading, speed = 200.0, 10.0
-            ve, vn = speed * math.sin(math.radians(heading)), speed * math.cos(math.radians(heading))
-            east, north = ve * (t - 30), -200.0 + vn * (t - 30)
-            lat, lon = offset(self.lat0, self.lon0, east, north)
-            msg = random.choice([rid_basic(b"1581F5FKD2B10099"), rid_location(lat, lon, 60, heading, speed),
-                                 rid_location(lat, lon, 60, heading, speed)])
-            self._emit({"mac": "BLE:C4:2D:91:07:5E:13", "rssi": rssi_at(math.hypot(east, north)) - 10,
-                        "ssid": "", "frame_type": "ble", "vendor_ies": [], "transport": "ble",
-                        "drone_data": remote_id.parse_ble_service_data(bytes([0x0D, int(t) % 256]) + msg)},
-                       probability=0.5)
+        if 20 <= t < 280:  # Remote ID quad over BLE, inbound: from ~2 km NE towards the OP, CPA 120 m
+            INBOUND.tick(t - 20, centre, self._emit, int(t))
+        if 60 <= t < 300:  # DJI Wi-Fi drone, crossing: orbits the OP at 600 m, 12 m/s anticlockwise
+            ORBIT.tick(t - 60, centre, self._emit)
+        if 30 <= t < 290:  # Remote ID quad over BLE, outbound: from 200 m S of the OP, course 200°, 10 m/s
+            OUTBOUND.tick(t - 30, centre, self._emit, int(t))
 
         # Parrot AP, no Remote ID: probable only (signal rises then falls: closing~ then opening~)
         if 120 <= t < 240:
             d = 150 + abs(t - 180) * 6
-            self._emit({"mac": "90:3A:E6:41:0C:7E", "rssi": rssi_at(d), "ssid": "Anafi-410C7E",
+            self._emit({"mac": "90:3A:E6:41:0C:7E", "rssi": rssi_at(d), "ssid": "Anafi-410C7E", "simulated": True,
                         "frame_type": "beacon", "vendor_ies": [], "transport": "wifi"}, probability=0.3)
 
         # Drone-related devices that must NOT raise an alarm
-        self._emit({"mac": "60:60:1F:44:55:66", "rssi": rssi_at(35), "ssid": "OsmoAction4-5566",
+        self._emit({"mac": "60:60:1F:44:55:66", "rssi": rssi_at(35), "ssid": "OsmoAction4-5566", "simulated": True,
                     "frame_type": "beacon", "vendor_ies": [], "transport": "wifi"}, probability=0.15)
 
         for mac, ssid, ftype, dist in BACKGROUND:
-            self._emit({"mac": mac, "rssi": rssi_at(dist), "ssid": ssid, "frame_type": ftype,
+            self._emit({"mac": mac, "rssi": rssi_at(dist), "ssid": ssid, "frame_type": ftype, "simulated": True,
                         "vendor_ies": [], "transport": "wifi"}, probability=0.2)
 
     def run(self):

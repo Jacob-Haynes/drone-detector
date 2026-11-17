@@ -54,6 +54,9 @@ def parse_args():
                         help="No mesh alerts on meshbus/tx (env MESH_ALERTS=0)")
     parser.add_argument("--simulate", action="store_true",
                         help="Simulated detections, no hardware (CoT callsigns get a SIM- prefix)")
+    parser.add_argument("--demo-mode", default=env("DEMO_MODE", "continuous"),
+                        help="continuous (default: --simulate runs its loop) or on_demand (no background "
+                             "simulation; scenarios fired from the page). Env DEMO_MODE")
     return parser.parse_args()
 
 
@@ -64,6 +67,9 @@ def main():
         datefmt="%H:%M:%S",
     )
     args = parse_args()
+    from detector.demo import DemoRunner, demo_mode
+
+    args.demo_mode = demo_mode(args.demo_mode)
     # uvicorn re-raises SIGTERM after its own shutdown; turn it into a normal exit so the
     # finally blocks run (heartbeat publishes "stopped" instead of the broker's "error" will)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
@@ -94,7 +100,7 @@ def main():
                          "hopper": None, "ble": None, "cot": cot, "mesh": mesh,
                          "sensor_position": None}
 
-    if args.simulate:
+    if args.simulate:  # no hardware capture
         from detector.simulator import DemoScenario
 
         centre = (args.sensor_lat, args.sensor_lon) if args.sensor_lat is not None and args.sensor_lon is not None \
@@ -104,7 +110,10 @@ def main():
             from detector.simulator import DEFAULT_CENTRE
             cot.sensor_lat, cot.sensor_lon = DEFAULT_CENTRE
             cot.client.sensor_lat, cot.client.sensor_lon = DEFAULT_CENTRE  # registration SA too
-        threading.Thread(target=DemoScenario(engine, centre).run, daemon=True, name="sim").start()
+        if args.demo_mode == "continuous":
+            threading.Thread(target=DemoScenario(engine, centre).run, daemon=True, name="sim").start()
+        else:
+            log.info("DEMO_MODE=on_demand: no background simulation; fire scenarios from the Demo card")
         if centre is None:
             log.warning("SENSOR_LAT/SENSOR_LON not set: simulating around the default demo site")
     else:
@@ -142,12 +151,27 @@ def main():
     if mesh is not None:
         mesh.op = op
 
+    from detector.simulator import DEFAULT_CENTRE
+
+    demo = DemoRunner(engine, centre=op or DEFAULT_CENTRE, cot=cot, mesh=mesh, mode=args.demo_mode).start()
+    web_module.demo = demo
+    if args.demo_mode == "on_demand" and not args.simulate:
+        log.info("DEMO_MODE=on_demand: real capture on, simulated drones only when a scenario is fired")
+
     from detector.heartbeat import Heartbeat
     from detector.scanner import CAPTURE_STATE
 
+    def demo_text():
+        active = demo.active()
+        if args.demo_mode == "continuous" and not active:
+            return ""
+        return f"; demo {args.demo_mode}" + (f": {', '.join(active)} (SIMULATED)" if active else "")
+
     def heartbeat_state():
         if args.simulate:
-            return "simulate", "ok", "scripted demo scenario (SIMULATED)"
+            what = ("scripted demo scenario (SIMULATED)" if args.demo_mode == "continuous"
+                    else "step-by-step demo, no hardware")
+            return "simulate", "ok", what + demo_text()
         wifi = (not args.no_wifi) and CAPTURE_STATE["running"]
         ble = web_module.status.get("ble")
         ble_on = bool(getattr(ble, "active", False))
@@ -160,9 +184,10 @@ def main():
         if web_module.status.get("sensor_position") is None:
             parts.append("position not set")
         status = "ok" if wifi and (ble_on or not args.ble) else ("degraded" if wifi or ble_on else "error")
-        return "cpu", status, "; ".join(parts)
+        return "cpu", status, "; ".join(parts) + demo_text()
 
-    heartbeat = Heartbeat("drone-detector", heartbeat_state, port=args.web_port).start()
+    heartbeat = Heartbeat("drone-detector", heartbeat_state, port=args.web_port,
+                          extra_fn=lambda: {"demo_mode": args.demo_mode, "demo_active": demo.active()}).start()
 
     async def run_web():
         config = uvicorn.Config(web_module.app, host="0.0.0.0", port=args.web_port,

@@ -90,6 +90,8 @@ class DetectionEngine:
                                         transport=frame.get("transport", "wifi"))
                 self._devices[mac] = device
             previous = device.classification
+            if frame.get("simulated"):
+                device.simulated = True
 
             device.update_rssi(rssi)
             if ssid and not device.ssid:
@@ -161,6 +163,17 @@ class DetectionEngine:
                 if d.is_active
                 and d.classification in (Classification.DRONE_CONFIRMED, Classification.DRONE_PROBABLE)
             ]
+
+    def remove(self, macs) -> list[DetectedDevice]:
+        """Drop these devices at once (demo clear). Returns the ones that were there."""
+        out = []
+        with self._lock:
+            for mac in macs:
+                dev = self._devices.pop(mac, None)
+                self._last_alert.pop(mac, None)
+                if dev is not None:
+                    out.append(dev)
+        return out
 
     def cleanup(self):
         """Remove devices not seen for a long time."""

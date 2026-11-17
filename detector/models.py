@@ -77,6 +77,7 @@ class DetectedDevice:
     reason: str = ""  # why it got its classification (shown in UI and CoT remarks)
     transport: str = "wifi"  # wifi | ble
     track: MotionTrack = field(default_factory=MotionTrack, repr=False)  # position fixes for course/CPA
+    simulated: bool = False  # from --simulate or a demo scenario: labelled SIM everywhere
 
     def update_rssi(self, rssi: int):
         now = time()
@@ -126,6 +127,7 @@ class DetectedDevice:
             "active": self.is_active,
             "reason": self.reason,
             "transport": self.transport,
+            "simulated": self.simulated,
             "drone_id": {
                 "serial": self.drone_id.serial,
                 "drone_lat": self.drone_id.drone_lat,

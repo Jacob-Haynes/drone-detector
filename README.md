@@ -101,6 +101,31 @@ Each drone shows its course and whether it is coming towards the OP, e.g. `1.3 k
 
 The simulator flies one drone inbound with a 120 m CPA, one orbiting the OP at 600 m (crossing) and one outbound.
 
+### Step-by-step demo
+
+`DEMO_MODE=continuous` (the default) keeps today's behaviour: `--simulate` runs its 5-minute loop. With `DEMO_MODE=on_demand` nothing simulated flies on its own. Real Wi-Fi and Bluetooth Remote ID capture keeps running, unless `--simulate` is also set (that never captures). The presenter fires each scenario from the **Demo** card. In on_demand mode the card is the first thing on the page; in continuous mode it sits under the drone list. The launcher's Presenter panel can fire them too, through the API (ui-kit `DEMO-TRIGGER-CONTRACT.md`):
+
+| Scenario | What flies | Length |
+|---|---|---|
+| `inbound` | One Remote ID quad from 1.2 km NE at 10 m/s: Closing, CPA 120 m after about 2 min. It stops there, comes down and keeps broadcasting from the ground | 175 s |
+| `crossing` | A DJI Wi-Fi drone circling the OP at 600 m (Crossing), with its home and pilot positions | 180 s |
+| `outbound` | A Remote ID quad leaving from 200 m S of the OP (Opening) | 150 s |
+| `swarm` | Three Remote ID quads in line abreast from 1.5 km NE, CPAs about 150, 40 and 150 m | 180 s |
+
+- **Flight models:** the scenarios use the simulator's own flight models, built in the real wire format. Each demo drone has its own MAC and serial, so it never merges with the continuous loop's drones.
+- **Labelling:** every demo drone is labelled as simulated, in live mode too: `SIM-` callsigns, `SIMULATED: ` remarks, `[SIM] ` mesh texts and the SIM tag on the page.
+- **Mesh texts:** a simulated drone and a real one never share a mesh text.
+- **Clear demo:** stops every scenario. It also removes their drones and their operator markers from the page and from ATAK at once: each marker is sent again with stale = now, then a `t-x-d-d` forcedelete, then the registration SA. Real detections are never touched.
+- **End of a scenario:** a scenario ends on its own when its time is up, and its CoT then expires as normal.
+
+API:
+
+- `GET /api/demo/scenarios` returns `{"mode", "scenarios": [{"id", "label", "hint", "duration_s"}], "active"}`.
+- `POST /api/demo/trigger {"id": "inbound"}` returns `{"ok", "id", "until"}`. An unknown id is a 400; triggering a scenario that is already running restarts it.
+- `POST /api/demo/clear` returns `{"ok", "cleared": <scenarios stopped>, "tracks": <simulated drones removed>}`.
+
+`/api/status` and the heartbeat carry `demo_mode` and `demo_active`. The heartbeat `detail` adds e.g. "demo on_demand: inbound (SIMULATED)".
+
 ## ATAK Integration
 
 CoT goes over TCP to `TAK_HOST:TAK_PORT` (default `127.0.0.1:8087`, OpenTAKServer as set up by blufor-tracker) through `detector/tak_client.py` (kit contract v5). It keeps one connection open. 3 s after each connect it registers the sensor as `isrkit-drone-detector-<ISR_HOST>`, callsign `DRONE-DET <ISR_HOST>`, at `SENSOR_LAT/LON`, and re-sends that every 60 s. Only then does it send markers, all on that connection. Real OpenTAKServer on PostgreSQL drops CoT from a sender with no EUD row, only relays to a connection that registered after OTS's internal channel opened, and needs unique callsigns. The sender runs in the background and reconnects with backoff. The detector starts and keeps detecting when no TAK server is up. Set `SENSOR_LAT`/`SENSOR_LON` (the shared OP position) so OUI/SSID-only detections can be placed near the sensor. Without it they are not put on the map (never at 0,0), and the dashboard and heartbeat say "position not set". Disable CoT with `--no-cot`.

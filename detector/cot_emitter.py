@@ -21,7 +21,11 @@ Markers:
 
 Rate (contract C4.4): at most one update per ``MIN_UPDATE_S`` (5 s) per track, with a long stale
 time so markers don't flicker between updates. A change of classification is sent at once.
-Labelling (C4.3): in ``--simulate`` the remarks start ``SIMULATED: `` and callsigns ``SIM-``.
+Labelling (C4.3): in ``--simulate``, and for every demo drone (``device.simulated``), the remarks
+start ``SIMULATED: `` and callsigns ``SIM-``.
+
+``retract(device)`` removes a track's markers from ATAK at once (demo clear): each marker again
+with stale = now (OTS keeps its stored copy greyed out), then a ``t-x-d-d`` forcedelete.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ import os
 import time
 
 from detector.models import Classification, DetectedDevice
-from detector.tak_client import TakClient
+from detector.tak_client import TakClient, build_delete
 
 logger = logging.getLogger(__name__)
 
@@ -62,16 +66,22 @@ class CotEmitter:
 
     # ── building ──────────────────────────────────────────────────
 
-    def build(self, device: DetectedDevice, now: float | None = None) -> list[str]:
+    def uids(self, device: DetectedDevice) -> tuple[str, str]:
+        """(UAV marker uid, its callsign)."""
+        d = device.drone_id
+        tag = "SIM-" if self.simulated or device.simulated else ""
+        uid = f"{UID_PREFIX}{tag}{device.mac.replace(':', '')}"
+        callsign = f"{tag}{d.serial}" if d and d.serial else f"{tag}UAV {device.mac[-5:]}"
+        return uid, callsign
+
+    def build(self, device: DetectedDevice, now: float | None = None, stale_s: float = STALE_SECONDS) -> list[str]:
         """CoT events for a device (UAV marker, plus operator marker if known)."""
         now = time.time() if now is None else now
         if device.classification not in (Classification.DRONE_CONFIRMED, Classification.DRONE_PROBABLE):
             return []
 
         d = device.drone_id
-        tag = "SIM-" if self.simulated else ""
-        uid = f"{UID_PREFIX}{tag}{device.mac.replace(':', '')}"
-        callsign = f"{tag}{d.serial}" if d and d.serial else f"{tag}UAV {device.mac[-5:]}"
+        uid, callsign = self.uids(device)
 
         parts = [f"drone-detector: {device.classification.value}", device.reason or None,
                  f"RSSI {device.rssi} dBm"]
@@ -90,7 +100,7 @@ class CotEmitter:
                 parts.append(f"operator ID {d.operator_id}")
             if d.description:
                 parts.append(d.description)
-        prefix = SIM_REMARKS if self.simulated else ""
+        prefix = SIM_REMARKS if self.simulated or device.simulated else ""
         dist = device.distance_estimate_m
         op = (self.sensor_lat, self.sensor_lon) if self.sensor_lat is not None and self.sensor_lon is not None \
             else None
@@ -117,14 +127,14 @@ class CotEmitter:
             track = {"speed": motion.speed, "course": motion.course}
         # tak_client.marker: parent link to this tool's registered uid, so OTS also stores it
         # (OTS web map); see tak_client's module docstring for the fields OTS requires
-        uav = self.client.marker(uid, f"a-{aff}-A-M-F-Q", callsign, lat, lon, now=now, stale_s=STALE_SECONDS,
+        uav = self.client.marker(uid, f"a-{aff}-A-M-F-Q", callsign, lat, lon, now=now, stale_s=stale_s,
                                  hae=hae, ce=ce, le=50.0, remarks=prefix + ", ".join(p for p in parts if p),
                                  location_source="GPS" if d and d.has_position else None, **track)
         events = [uav] if uav else []
 
         if d and d.has_operator:
             op = self.client.marker(f"{uid}-OPERATOR", "a-u-G", f"{callsign} operator", d.operator_lat,
-                                    d.operator_lon, now=now, stale_s=STALE_SECONDS, ce=15.0, le=50.0,
+                                    d.operator_lon, now=now, stale_s=stale_s, ce=15.0, le=50.0,
                                     remarks=f"{prefix}drone-detector: pilot/operator position for {callsign} "
                                             f"(UAV uid {uid})")
             if op:
@@ -156,6 +166,31 @@ class CotEmitter:
         for xml in events:
             self.client.send(xml)
         self.client.start()
+
+    def retract(self, device: DetectedDevice, now: float | None = None) -> int:
+        """Remove this track's markers from ATAK now. Returns the number of t-x-d-d sent; the
+        caller sends the registration SA again after them (``client.send_sa_now()``)."""
+        now = time.time() if now is None else now
+        self._last_sent.pop(device.mac, None)
+        events = self.build(device, now, stale_s=0.0)
+        if not events:
+            return 0
+        uid, _ = self.uids(device)
+        targets = [(uid, events[0])] + ([(f"{uid}-OPERATOR", events[1])] if len(events) > 1 else [])
+        op = (self.sensor_lat, self.sensor_lon) if self.sensor_lat is not None and self.sensor_lon is not None \
+            else None
+        deletes = []
+        for target, xml in targets:
+            ctype = xml.split('type="', 1)[1].split('"', 1)[0]
+            lat, lon = op or (float(xml.split('lat="', 1)[1].split('"', 1)[0]),
+                              float(xml.split('lon="', 1)[1].split('"', 1)[0]))
+            delete = build_delete(target, ctype, lat, lon, now=now, remarks=SIM_REMARKS + "demo cleared")
+            if delete:
+                deletes.append(delete)
+        for xml in events + deletes:
+            self.client.send(xml)
+        self.client.start()
+        return len(deletes)
 
     @property
     def connected(self) -> bool:

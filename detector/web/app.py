@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -19,6 +19,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # Set by __main__.py before starting the server
 engine = None
 status: dict = {}
+demo = None  # detector.demo.DemoRunner
 
 # Connected WebSocket clients
 _clients: set[WebSocket] = set()
@@ -62,7 +63,37 @@ async def get_status():
         "sensor_position": status.get("sensor_position"),
         "sensor_position_text": ("%.5f, %.5f" % tuple(status["sensor_position"]))
         if status.get("sensor_position") else "position not set",
+        "demo_mode": getattr(demo, "mode", "continuous"),
+        "demo_active": demo.active() if demo is not None else [],
     }
+
+
+# ── step-by-step demo (ui-kit DEMO-TRIGGER-CONTRACT.md) ───────────
+
+def _demo():
+    if demo is None:
+        raise HTTPException(503, "Demo scenarios are not available")
+    return demo
+
+
+@app.get("/api/demo/scenarios")
+async def demo_scenarios():
+    return _demo().scenarios()
+
+
+@app.post("/api/demo/trigger")
+async def demo_trigger(body: dict = Body(...)):
+    runner = _demo()
+    sid = body.get("id") if isinstance(body, dict) else None
+    if not isinstance(sid, str) or sid not in {s["id"] for s in runner.scenarios()["scenarios"]}:
+        raise HTTPException(400, "Unknown scenario")
+    options = {k: v for k, v in body.items() if k != "id"}
+    return runner.trigger(sid, **options)
+
+
+@app.post("/api/demo/clear")
+async def demo_clear():
+    return _demo().clear()
 
 
 @app.websocket("/ws")

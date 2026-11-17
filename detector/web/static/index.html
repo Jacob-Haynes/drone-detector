@@ -19,6 +19,10 @@
   .dd-rel { color: var(--muted); }
   .dd-arrow { display: inline-block; width: 1em; text-align: center; }
   .dd-kind { font-size: 13px; color: var(--muted); }
+  .dd-demo { margin: var(--gap) 0; }
+  main > .dd-demo:first-child { margin-top: 0; }
+  .dd-demo-btns { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 8px; }
+  .dd-demo-btns .dd-clear { margin-left: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 8px; }
   th { text-align: left; color: var(--muted); font: 500 14px/1.2 var(--label); letter-spacing: .04em; padding: 6px 8px; border-bottom: 1px solid var(--line); }
   td { padding: 6px 8px; border-bottom: 1px solid var(--line); }
@@ -54,6 +58,12 @@
     <h2>Drones seen</h2>
     <ul class="isr-list dd-drones" id="drones"></ul>
     <p class="isr-muted" id="empty">No drones in range. Remote ID broadcasts appear here as soon as they are heard.</p>
+  </div>
+
+  <div class="isr-card dd-demo" id="demo-card" hidden>
+    <h2>Demo</h2>
+    <div class="dd-demo-btns" id="demo-btns"></div>
+    <div class="isr-muted" id="demo-note">Each button flies simulated drones, labelled SIM here and on ATAK.</div>
   </div>
 
   <details class="isr-more">
@@ -112,8 +122,9 @@
     const devices = data.devices || [];
     const sim = st.mode === 'simulate';
     const drones = devices.filter(d => DRONE.includes(d.classification) || d.drone_id);
+    const anySim = sim || drones.some(d => d.simulated);
     document.getElementById('count').textContent = String(drones.length).padStart(2, '0');
-    document.getElementById('sim-tag').hidden = !sim;
+    document.getElementById('sim-tag').hidden = !anySim;
     const confirmed = drones.filter(d => d.classification === 'DRONE_CONFIRMED').length;
     document.getElementById('count-note').textContent =
       drones.length ? `${confirmed} confirmed, ${drones.length - confirmed} probable` : 'Listening';
@@ -146,7 +157,7 @@
         <span class="dd-motion">${motionHtml(m)}</span>
         <span class="isr-muted">${esc(extra)}${id.operator_lat ? ' · operator located' : ''}</span>
         <span class="dd-when isr-muted">${ago(d.last_seen)}</span>
-        ${sim ? '<span class="isr-tag sim">SIM</span>' : ''}
+        ${sim || d.simulated ? '<span class="isr-tag sim">SIM</span>' : ''}
       </li>`;
     }).join('');
 
@@ -175,6 +186,54 @@
       `${st.hopping ? ', hopping channels' : ''}. CoT to TAK ${st.cot_enabled ? 'on' : 'off'}, mesh alerts ${st.mesh_alerts ? 'on' : 'off'}.`;
   }
 
+  // Step-by-step demo: one button per scenario, plus Clear demo (ui-kit DEMO-TRIGGER-CONTRACT.md)
+  let demo = null, demoMsg = '';
+  function showDemo() {
+    if (!demo) return;
+    const card = document.getElementById('demo-card');
+    card.hidden = false;
+    if (demo.mode === 'on_demand' && card.previousElementSibling) {  // step by step: first thing on the page
+      document.querySelector('main').prepend(card);
+    }
+    const names = Object.fromEntries(demo.scenarios.map(s => [s.id, s.label]));
+    const running = (demo.active || []).map(id => names[id] || id);
+    document.getElementById('demo-note').textContent = demoMsg ||
+      (running.length ? `Running: ${running.join(', ')}. Simulated, labelled SIM here and on ATAK.`
+        : 'Each button flies simulated drones, labelled SIM here and on ATAK.');
+  }
+  async function demoCall(path, body) {
+    demoMsg = '';
+    try {
+      const r = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body || {})});
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) demoMsg = typeof data.detail === 'string' ? data.detail : 'The detector did not accept that.';
+      else if (path.endsWith('clear')) demoMsg = `Demo cleared: ${data.tracks} simulated drones removed.`;
+    } catch (e) { demoMsg = 'The detector is not answering. Try again in a moment.'; }
+    await loadDemo();
+    setTimeout(() => { demoMsg = ''; showDemo(); }, 6000);
+    loadDevices();
+  }
+  async function loadDemo() {
+    try {
+      const first = !demo;
+      demo = await (await fetch('/api/demo/scenarios')).json();
+      if (first) {
+        const btns = demo.scenarios.map(s => {
+          const b = document.createElement('button');
+          b.className = 'isr-btn'; b.textContent = s.label; b.title = s.hint;
+          b.addEventListener('click', () => demoCall('/api/demo/trigger', {id: s.id}));
+          return b;
+        });
+        const clear = document.createElement('button');
+        clear.className = 'isr-btn dd-clear'; clear.textContent = 'Clear demo';
+        clear.addEventListener('click', () => demoCall('/api/demo/clear'));
+        document.getElementById('demo-btns').replaceChildren(...btns, clear);
+      }
+      showDemo();
+    } catch (e) { /* no demo API: leave the card hidden */ }
+  }
+
   async function refreshStatus() {
     try { st = await (await fetch('/api/status')).json(); } catch (e) { /* server restarting */ }
     showStatus();
@@ -193,6 +252,8 @@
   }
 
   refreshStatus().then(loadDevices);
+  loadDemo();
+  setInterval(loadDemo, 5000);
   setInterval(refreshStatus, 10000);
   connect();
 </script>

@@ -4,21 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Drone detector</title>
-<link rel="stylesheet" href="/static/isr-ui.css">
-<script src="/static/isr-ui.js"></script>
+<link rel="stylesheet" href="/static/isr-ui.css?v=2">
+<script src="/static/isr-ui.js?v=2"></script>
 <style>
   .dd-top { display: grid; gap: var(--gap); grid-template-columns: 1fr 2fr; margin-bottom: var(--gap); }
   .dd-count { display: flex; align-items: baseline; gap: 12px; }
   .dd-count .isr-big { font-size: 72px; }
   .dd-drones li { flex-wrap: wrap; }
-  .dd-id { font-weight: 600; min-width: 220px; }
-  .dd-where { font-size: 20px; font-weight: 600; min-width: 170px; }
+  .dd-id { min-width: 220px; }
+  .dd-where { font-size: 20px; min-width: 170px; }
   .dd-when { margin-left: auto; }
   .dd-kind { font-size: 13px; color: var(--muted); }
-  .dd-kind.confirmed { color: var(--bad); }
-  .dd-kind.probable { color: var(--warn); }
   table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 8px; }
-  th { text-align: left; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th { text-align: left; color: var(--muted); font: 500 14px/1.2 var(--label); letter-spacing: .04em; padding: 6px 8px; border-bottom: 1px solid var(--line); }
   td { padding: 6px 8px; border-bottom: 1px solid var(--line); }
   @media (max-width: 640px) { .dd-top { grid-template-columns: 1fr; } .dd-when { margin-left: 0; } }
 </style>
@@ -35,7 +33,7 @@
 
 <main>
   <div class="dd-top">
-    <div class="isr-card">
+    <div class="isr-card" id="count-card">
       <h2>Drones now</h2>
       <div class="dd-count"><span class="isr-big" id="count">0</span><span class="isr-tag sim" id="sim-tag" hidden>SIM</span></div>
       <div class="isr-muted" id="count-note">Listening</div>
@@ -68,7 +66,8 @@
   // SSIDs, serials and vendor strings come off the air: always escape before innerHTML
   const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const DRONE = ['DRONE_CONFIRMED', 'DRONE_PROBABLE'];
-  const KIND = {DRONE_CONFIRMED: ['Confirmed', 'confirmed'], DRONE_PROBABLE: ['Probable', 'probable']};
+  // Same affiliation as the CoT sent to ATAK: confirmed = hostile air (a-h), probable = unknown (a-u)
+  const KIND = {DRONE_CONFIRMED: ['Confirmed', 'hostile'], DRONE_PROBABLE: ['Probable', 'unknown']};
   const POINTS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
   let st = {}, wsOk = false, last = {devices: []};
 
@@ -99,7 +98,8 @@
     const devices = data.devices || [];
     const sim = st.mode === 'simulate';
     const drones = devices.filter(d => DRONE.includes(d.classification) || d.drone_id);
-    document.getElementById('count').textContent = drones.length;
+    document.getElementById('count').textContent = String(drones.length).padStart(2, '0');
+    document.getElementById('count-card').className = drones.length ? 'isr-card alert' : 'isr-card';
     document.getElementById('sim-tag').hidden = !sim;
     const confirmed = drones.filter(d => d.classification === 'DRONE_CONFIRMED').length;
     document.getElementById('count-note').textContent =
@@ -115,12 +115,12 @@
     document.getElementById('empty').hidden = drones.length > 0;
     document.getElementById('drones').innerHTML = located.map(([d, w]) => {
       const id = d.drone_id || {};
-      const [kind, cls] = KIND[d.classification] || ['Related', ''];
+      const [kind, aff] = KIND[d.classification] || ['Related', 'unknown'];
       const name = id.serial || d.ssid || d.mac;
       const extra = d.drone_id
         ? `${Math.round(id.drone_alt || 0)} m alt, ${(id.speed || 0).toFixed(0)} m/s` : (d.vendor || '');
       return `<li>
-        <span class="dd-id">${esc(name)}<br><span class="dd-kind ${cls}">${kind}${id.ua_type ? ' · ' + esc(id.ua_type) : ''}</span></span>
+        <span class="dd-id"><span class="aff ${aff}"></span>${esc(name)}<br><span class="dd-kind">${kind}${id.ua_type ? ' · ' + esc(id.ua_type) : ''}</span></span>
         <span class="dd-where">${esc(w.text)}</span>
         <span class="isr-muted">${esc(extra)}${id.operator_lat ? ' · operator located' : ''}</span>
         <span class="dd-when isr-muted">${ago(d.last_seen)}</span>

@@ -158,7 +158,7 @@ The `detail` field says which, plus the channel and the TAK state. `mode` is `cp
 ## Tests
 
 ```bash
-pip install -r requirements.txt pytest httpx
+pip install -r requirements.txt -r requirements-dev.txt   # versions are capped at the ones tested
 python -m pytest
 ```
 

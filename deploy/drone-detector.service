@@ -1,14 +1,19 @@
 [Unit]
-Description=WiFi Drone Detector
-After=network.target
+Description=Drone Detector (Wi-Fi DroneID/Remote ID + Bluetooth Remote ID)
+After=network.target bluetooth.target
+Wants=bluetooth.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+# root: monitor mode, raw capture, iw channel changes
 User=root
 WorkingDirectory=/opt/drone-detector
+EnvironmentFile=-/etc/drone-detector.env
 ExecStart=/opt/drone-detector/deploy/start.sh
 Restart=always
 RestartSec=5
+TimeoutStopSec=15
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

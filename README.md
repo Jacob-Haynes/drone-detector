@@ -1,22 +1,57 @@
 # Drone Detector
 
-WiFi-based drone detection for Raspberry Pi 5. Detects DJI drones (DroneID beacons), FAA/EU Remote ID broadcasts, and classifies devices by manufacturer OUI.
+Passive drone detection for Raspberry Pi 5 using Wi-Fi (a USB adapter in monitor mode) and Bluetooth LE (the Pi's onboard Bluetooth). It decodes DJI DroneID and ASTM F3411 / EU Remote ID broadcasts. It flags drone-maker devices by OUI and SSID without calling every DJI gadget a drone. Detections go to ATAK as CoT through OpenTAKServer.
 
-## Features
+## What It Can and Can't See
 
-- DJI DroneID parsing (serial, GPS, operator location, speed, altitude)
-- OpenDroneID / Remote ID (ASTM F3411) parsing
-- OUI-based drone manufacturer detection (DJI, Parrot, Autel, Skydio)
-- Real-time web dashboard on port 8080
-- Optional CoT output to FreeTAKServer for ATAK integration
-- Simulation mode for testing without hardware
+| Source | How | Gives |
+|---|---|---|
+| **Remote ID, Wi-Fi Beacon** | vendor IE `FA:0B:BC` type `0x0D` | serial, UA type, position, altitude, speed, heading, operator position and ID |
+| **Remote ID, Wi-Fi NAN** | NAN action frames to `51:6F:9A:01:00:00` | same |
+| **Remote ID, Bluetooth LE** | service data UUID `0xFFFA` (BT4 legacy single messages, BT5 message packs) | same |
+| **DJI DroneID (Wi-Fi)** | beacon vendor IE `26:37:12` | serial, position, altitude, speed, heading, home/pilot position |
+| **OUI + SSID** | beacons and probe requests | "probable drone" or "drone-related device", no position |
+
+### DJI O3 / O4 FPV builds (like the demo quad)
+
+Be clear about this in a brief: **a DJI O3 or O4 Air Unit on its own broadcasts no Remote ID**, so this detector cannot see it.
+- The air units have no GPS, no Bluetooth and no Wi-Fi radio of their own, so there is nothing to carry broadcast Remote ID. This is from FPV community sources ([IntoFPV](https://intofpv.com/printthread.php?tid=28648)). DJI's O4 FAQ does not cover Remote ID, and DJI publishes no Remote ID statement for the air units.
+- Their video link is DJI's proprietary OcuSync/O3/O4 radio on 2.4/5.8 GHz, not Wi-Fi. A monitor-mode Wi-Fi card cannot decode it. Seeing that link at all needs an SDR that covers 2.4/5.8 GHz (an RTL-SDR does not).
+- To make the FPV quad show up live, fit a **standalone broadcast Remote ID module with its own GPS**. It is then detected over Bluetooth LE with position, serial and operator data. [ArduRemoteID](https://github.com/ArduPilot/ArduRemoteID) (ESP32-S3/C3, Wi-Fi beacon/NAN and BT4/BT5) needs an ArduPilot/PX4 flight controller to feed it position over MAVLink/DroneCAN, so it does not suit a Betaflight build on its own.
+
+### Demo options, in order of hardware needed
+
+1. **No extra hardware: simulation.** `SIMULATE=1` with `SENSOR_LAT`/`SENSOR_LON` set to the demo site (in `/etc/drone-detector.env`). A scripted 5-minute scenario plays around the site:
+   - a Remote ID quad circling on Bluetooth, with its operator;
+   - a DJI Wi-Fi drone crossing;
+   - a Parrot access point ("probable");
+   - a DJI controller and an Osmo camera that are correctly *not* alarmed.
+
+   It runs through the real parsers, classifier and CoT output. Every ATAK callsign starts `SIM-`, every CoT remark starts `SIMULATED: ` (so tac-advisor's SITREP says so too), mesh texts start `[SIM] ` and the dashboard shows a SIMULATED badge. Say on screen that it is a simulation.
+2. **No extra hardware: live Bluetooth Remote ID.** The Pi's onboard Bluetooth picks up any drone nearby that broadcasts Remote ID over Bluetooth. Many current consumer drones do when Remote ID is on (check the model), as do add-on modules. Without a Wi-Fi adapter the detector runs Bluetooth-only automatically.
+3. **USB monitor-mode Wi-Fi adapter** (e.g. Alfa AWUS036ACHM). Adds Wi-Fi beacon/NAN Remote ID, DJI Wi-Fi DroneID and the OUI/SSID classification.
+
+The limits matter when you brief what the kit can do:
+- **DJI OcuSync/O2/O3/O4 aircraft** (most current DJI drones) send DroneID on their own radio link. A Wi-Fi card cannot decode that; it needs an SDR. These aircraft *are* seen when they broadcast standard Remote ID (Wi-Fi or Bluetooth), which is mandatory in the US and EU.
+- **Analogue or digital FPV quads** without Remote ID and with no Wi-Fi are invisible to this tool. rf-spectrum (a private repo) is the tool for those.
+- Distances from RSSI are rough (±2× is normal). Remote ID/DroneID positions are what the drone reports.
+
+## Classification
+
+| Class | Meaning | Sent to ATAK |
+|---|---|---|
+| `DRONE_CONFIRMED` | A DroneID / Remote ID broadcast was decoded | Yes: hostile UAV (`a-h-A-M-F-Q`) at its reported position, plus an operator marker when known. `COT_AFFILIATION=u` makes it unknown instead |
+| `DRONE_PROBABLE` | A drone maker's access point (DJI/Parrot/Autel/Skydio OUI), or an AP with a drone-style SSID (`TELLO-`, `Anafi-`, `DJI-Mavic…`) | Yes: unknown UAV (`a-u-A-M-F-Q`) at the sensor position (`SENSOR_LAT/LON`) with RSSI distance as the error circle; not sent if no sensor position is set |
+| `DRONE_RELATED` | A drone maker's client device (controllers, goggles), DJI cameras/mics (Osmo, Pocket, Action, RC), or a phone probing for a drone's network (likely the operator) | No, UI only |
+| `UNKNOWN_NEW` → `DEVICE` | Everything else | No |
+
+A drone OUI alone never confirms a drone. Randomised (locally administered) MACs are never matched against OUIs.
 
 ## Hardware
 
 - Raspberry Pi 5
-- USB WiFi adapter with monitor mode support (e.g. Alfa AWUS036ACHM)
-
-The Pi's built-in WiFi stays available for the BFT hotspot when running in combined mode.
+- USB Wi-Fi adapter with monitor mode on 2.4 and 5 GHz (e.g. Alfa AWUS036ACHM / ACM). The Pi's onboard Wi-Fi (`wlan0`) stays on the ATAK hotspot and is never touched.
+- The Pi's onboard Bluetooth for BLE Remote ID. The hotspot does not use it.
 
 ## Install
 
@@ -24,24 +59,112 @@ The Pi's built-in WiFi stays available for the BFT hotspot when running in combi
 sudo bash deploy/install.sh
 ```
 
+The install is idempotent and does not enable the service at boot; pi-profiles starts it. Code goes to `/opt/drone-detector` and config to `/etc/drone-detector.env` (see `deploy/drone-detector.env.example`).
+
+**Port 8060:** the dashboard is on 8060 (the kit port plan). 8080 belongs to OpenTAKServer's nginx (Marti HTTP API). Re-running the install moves an older `/etc/drone-detector.env` from 8080 to 8060.
+
+## How Capture Works
+
+`deploy/start.sh` (run by the service as root):
+1. Picks the capture adapter: `WIFI_IFACE`, or the first wireless interface that is not `HOTSPOT_IFACE` (default `wlan0`). This works for `wlan1` and `wlx…` names.
+2. Tells NetworkManager to leave it alone (`nmcli device set … managed no`), switches it to monitor mode and checks that it took.
+3. Starts the detector. It hops channels: all of 2.4 GHz plus 5 GHz including the 5.8 GHz band (149–165), 300 ms per channel. Channels 1/6/11 and 149–161 are visited more often. Channels the adapter refuses (e.g. DFS) are skipped. Override with `WIFI_CHANNELS=1,6,11,149,153,157,161` or `WIFI_BANDS=2.4`.
+
+With no adapter, or one without monitor mode, it runs **Bluetooth Remote ID only** and says so in the log. It never falls back to fake data. `SIMULATE=1` in the env file does that explicitly, and every simulated CoT callsign is prefixed `SIM-`.
+
 ## Usage
 
 ```bash
-# Standalone
 sudo pi-profiles drone-detector
 
-# Combined with BFT
-sudo pi-profiles bft-drone
-
-# Manual (simulation mode)
+# Manual
 source .venv/bin/activate
-python -m detector --simulate
+python -m detector --simulate                            # no hardware
+sudo .venv/bin/python -m detector -i wlan1 --channels 6,149
+python -m detector --no-wifi                              # BLE Remote ID only
 ```
 
 ## Web UI
 
-Browse to `http://<pi-ip>:8080` for the detection dashboard.
+Browse to `http://isr-pi.local:8060` (`WEB_PORT`, default 8060) for the dashboard. `GET /api/status` shows the current channel, BLE state and TAK connection.
+
+### Direction of travel
+
+Each drone shows its course and whether it is coming towards the OP, e.g. `1.3 km NE · 225° ↙ Closing · CPA 120 m in 02:46`. The maths is in `detector/motion.py`.
+
+- **Course and speed.** The broadcast track is used when there is one: Remote ID track direction and ground speed, or DJI velocity north/east. DJI yaw is not used, because it is where the nose points, not the direction of travel. Otherwise they are worked out from position fixes at least 5 s or 10 m apart.
+- **Relative to the OP** (`SENSOR_LAT/LON`). The radial speed is the velocity component along the line from the OP. Below −1 m/s is **Closing**, above +1 m/s is **Opening**, in between is **Crossing**. Below 1 m/s ground speed is **Hovering**. The label uses the median of the last 5 fixes, so it doesn't flicker.
+- **CPA.** When closing, the page shows the closest point of approach on the current straight-line track: the distance and the time to it.
+- **No position (signal strength only).** These show `Closing~` or `Opening~` from a clear RSSI trend over 20 s, otherwise `–`. They never show a course.
+- **Order and colour.** Closing drones are listed first, then the rest by distance. Closing is the brass alert state.
+- **Where it goes.** The CoT marker carries `<track course speed>`, so ATAK draws the heading. Mesh alerts end with e.g. `hdg 225 closing`.
+
+The simulator flies one drone inbound with a 120 m CPA, one orbiting the OP at 600 m (crossing) and one outbound.
+
+### Step-by-step demo
+
+`DEMO_MODE=continuous` (the default) keeps today's behaviour: `--simulate` runs its 5-minute loop. With `DEMO_MODE=on_demand` nothing simulated flies on its own. Real Wi-Fi and Bluetooth Remote ID capture keeps running, unless `--simulate` is also set (that never captures). The presenter fires each scenario from the **Demo** card. In on_demand mode the card is the first thing on the page; in continuous mode it sits under the drone list. The launcher's Presenter panel can fire them too, through the API (ui-kit `DEMO-TRIGGER-CONTRACT.md`):
+
+| Scenario | What flies | Length |
+|---|---|---|
+| `inbound` | One Remote ID quad from 1.2 km NE at 10 m/s: Closing, CPA 120 m after about 2 min. It stops there, comes down and keeps broadcasting from the ground | 175 s |
+| `crossing` | A DJI Wi-Fi drone circling the OP at 600 m (Crossing), with its home and pilot positions | 180 s |
+| `outbound` | A Remote ID quad leaving from 200 m S of the OP (Opening) | 150 s |
+| `swarm` | Three Remote ID quads in line abreast from 1.5 km NE, CPAs about 150, 40 and 150 m | 180 s |
+
+- **Flight models:** the scenarios use the simulator's own flight models, built in the real wire format. Each demo drone has its own MAC and serial, so it never merges with the continuous loop's drones.
+- **Labelling:** every demo drone is labelled as simulated, in live mode too: `SIM-` callsigns, `SIMULATED: ` remarks, `[SIM] ` mesh texts and the SIM tag on the page.
+- **Mesh texts:** a simulated drone and a real one never share a mesh text.
+- **Clear demo:** stops every scenario. It also removes their drones and their operator markers from the page and from ATAK at once: each marker is sent again with stale = now, then a `t-x-d-d` forcedelete, then the registration SA. Real detections are never touched.
+- **Withdrawn on stop and on switch:** when the detector stops (SIGTERM or Ctrl-C), it clears any demo drones. After a `--simulate` run in continuous mode, it also takes the continuous loop's drones and operators off ATAK the same way. Every start in on_demand mode does the same for markers an earlier continuous run left behind. Those uids are fixed, so this works after a restart too. Without the withdrawal they stayed on the map until stale (5 minutes).
+- **End of a scenario:** a scenario ends on its own when its time is up, and its CoT then expires as normal.
+
+API:
+
+- `GET /api/demo/scenarios` returns `{"mode", "scenarios": [{"id", "label", "hint", "duration_s"}], "active"}`.
+- `POST /api/demo/trigger {"id": "inbound"}` returns `{"ok", "id", "until"}`. An unknown id is a 400; triggering a scenario that is already running restarts it.
+- `POST /api/demo/clear` returns `{"ok", "cleared": <scenarios stopped>, "tracks": <simulated drones removed>}`.
+
+`/api/status` and the heartbeat carry `demo_mode` and `demo_active`. The heartbeat `detail` adds e.g. "demo on_demand: inbound (SIMULATED)".
 
 ## ATAK Integration
 
-When FreeTAKServer is running, drone detections appear as hostile UAV markers on the ATAK map. Disable with `--no-cot`.
+CoT goes over TCP to `TAK_HOST:TAK_PORT` (default `127.0.0.1:8087`, OpenTAKServer as set up by blufor-tracker) through `detector/tak_client.py` (kit contract v5). It keeps one connection open. 3 s after each connect it registers the sensor as `isrkit-drone-detector-<ISR_HOST>`, callsign `DRONE-DET <ISR_HOST>`, at `SENSOR_LAT/LON`, and re-sends that every 60 s. Only then does it send markers, all on that connection. Real OpenTAKServer on PostgreSQL drops CoT from a sender with no EUD row, only relays to a connection that registered after OTS's internal channel opened, and needs unique callsigns. The sender runs in the background and reconnects with backoff. The detector starts and keeps detecting when no TAK server is up. Set `SENSOR_LAT`/`SENSOR_LON` (the shared OP position) so OUI/SSID-only detections can be placed near the sensor. Without it they are not put on the map (never at 0,0), and the dashboard and heartbeat say "position not set". Disable CoT with `--no-cot`.
+
+## Mesh Alerts
+
+New detections (`DRONE_CONFIRMED` or `DRONE_PROBABLE`) go out as a mesh text on `meshbus/tx`, which blufor-tracker's bridge transmits on the LoRa mesh. For example:
+
+```
+DRONE: UAV K0010042 DJI 51.15269,-1.77060 60m
+[SIM] DRONE: 2 new: UAV 5BKD23C0042 RID 51.15500,-1.74500 80m; probable UAV Parrot ~180m
+```
+
+- At most one text every 30 s from this tool. Detections that arrive in between are combined into the next text (up to 200 characters, then "+N more").
+- A text waits 5 s after the first frame, so the serial and position are in it.
+- Only new tracks alert: a first sighting, an upgrade from probable to confirmed, or a track that comes back after 10 minutes. Ongoing tracks only update the map.
+- `MESH_ALERTS=0` (or `--no-mesh`) turns them off.
+
+CoT updates are limited to one per 5 s per track, with a 5-minute stale time so markers stay up between updates.
+
+## Heartbeat
+
+Every 10 s the detector publishes a retained JSON message to `isrkit/heartbeat/drone-detector` for the launcher. It uses `MQTT_HOST` etc., default the Pi's broker as `guest`. `host` is `ISR_HOST` if set, else the lowercased short hostname.
+- `ok`: Wi-Fi capture plus Bluetooth are running.
+- `degraded`: only one of them is running, e.g. no Wi-Fi adapter.
+- `error`: neither is running.
+
+The `detail` field says which, plus the channel and the TAK state. `mode` is `cpu`, or `simulate` in simulation. It publishes `stopped` on a clean exit; `HEARTBEAT=0` turns it off.
+
+## Tests
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt   # versions are capped at the ones tested
+python -m pytest
+```
+
+The tests build real-format 802.11 frames with scapy. They cover DJI DroneID v1/v2, Remote ID over beacon, NAN and BLE with hand-checked byte vectors, the classification rules, CoT output and the channel hopper.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

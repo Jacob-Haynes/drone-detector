@@ -158,6 +158,20 @@ def main():
     if args.demo_mode == "on_demand" and not args.simulate:
         log.info("DEMO_MODE=on_demand: real capture on, simulated drones only when a scenario is fired")
 
+    from detector.simulator import continuous_tracks
+
+    withdraw_at = op or DEFAULT_CENTRE
+
+    def withdraw_continuous(why: str):
+        """The continuous loop's markers off ATAK now: they would otherwise stay until stale
+        (5 min) after a stop or a switch to on_demand. Fixed uids, so a restart can do it."""
+        if cot is not None:
+            n = cot.withdraw(continuous_tracks(), *withdraw_at, why=why)
+            log.info("Withdrew the continuous simulator's markers from TAK (%d deletes): %s", n, why)
+
+    if args.demo_mode == "on_demand":
+        withdraw_continuous("step-by-step demo started")
+
     from detector.heartbeat import Heartbeat
     from detector.scanner import CAPTURE_STATE
 
@@ -205,7 +219,22 @@ def main():
     except KeyboardInterrupt:
         log.info("Shutting down")
     finally:
+        shutdown_cleanup(args, cot, demo, withdraw_continuous)
         heartbeat.stop()
+
+
+def shutdown_cleanup(args, cot, demo, withdraw_continuous, flush_s: float = 3.0):
+    """On stop (SIGTERM or Ctrl-C): take every simulated marker this run owns off ATAK, and give
+    the TAK client a moment to send the deletes before the process exits."""
+    try:
+        demo.stop()
+        demo.clear()  # demo scenario drones (live or ended); real detections untouched
+        if args.simulate and args.demo_mode == "continuous":
+            withdraw_continuous("simulator stopped")
+        if cot is not None and not cot.client.flush(flush_s):
+            log.warning("TAK server not reachable: simulated markers expire when stale instead")
+    except Exception:
+        log.exception("Withdrawing simulated markers at shutdown failed")
 
 
 if __name__ == "__main__":

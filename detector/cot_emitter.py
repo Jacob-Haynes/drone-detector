@@ -24,6 +24,9 @@ time so markers don't flicker between updates. A change of classification is sen
 Labelling (C4.3): in ``--simulate``, and for every demo drone (``device.simulated``), the remarks
 start ``SIMULATED: `` and callsigns ``SIM-``.
 
+``withdraw(tracks, lat, lon)`` does the same by uid alone, for the continuous simulator's fixed
+tracks at start-up and shutdown (``__main__``), when there is no device to rebuild them from.
+
 ``retract(device)`` removes a track's markers from ATAK at once (demo clear): each marker again
 with stale = now (OTS keeps its stored copy greyed out), then a ``t-x-d-d`` forcedelete.
 """
@@ -34,7 +37,7 @@ import logging
 import os
 import time
 
-from detector.models import Classification, DetectedDevice
+from detector.models import Classification, DetectedDevice, DroneIDData
 from detector.tak_client import TakClient, build_delete
 
 logger = logging.getLogger(__name__)
@@ -189,6 +192,36 @@ class CotEmitter:
                 deletes.append(delete)
         for xml in events + deletes:
             self.client.send(xml)
+        self.client.start()
+        return len(deletes)
+
+    def withdraw(self, tracks: list[tuple[str, str, bool]], lat: float, lon: float,
+                 now: float | None = None, why: str = "simulator stopped") -> int:
+        """Take simulated tracks off ATAK by uid alone, with no device in hand (start-up and
+        shutdown): ``tracks`` is (MAC, serial, has operator) as ``simulator.continuous_tracks()``.
+        Each marker again with stale = now at ``lat, lon``, then a ``t-x-d-d`` forcedelete, then
+        the registration SA (queued after them, so it also follows when not yet registered).
+        Returns the number of deletes queued."""
+        now = time.time() if now is None else now
+        markers, deletes = [], []
+        for mac, serial, has_operator in tracks:
+            device = DetectedDevice(mac=mac, simulated=True, drone_id=DroneIDData(serial=serial) if serial else None)
+            uid, callsign = self.uids(device)
+            targets = [(uid, "a-u-A-M-F-Q", callsign)]
+            if has_operator:
+                targets.append((f"{uid}-OPERATOR", "a-u-G", f"{callsign} operator"))
+            for target, ctype, name in targets:
+                xml = self.client.marker(target, ctype, name, lat, lon, now=now, stale_s=0.0, ce=9999999.0,
+                                         le=9999999.0, remarks=f"{SIM_REMARKS}drone-detector: {why}")
+                delete = build_delete(target, ctype, lat, lon, now=now, remarks=f"{SIM_REMARKS}{why}")
+                if xml and delete:
+                    markers.append(xml)
+                    deletes.append(delete)
+            self._last_sent.pop(mac, None)
+        for xml in markers + deletes:
+            self.client.send(xml)
+        if deletes:
+            self.client.send(self.client.sa(now))  # OTS marks the sender disconnected on t-x-d-d
         self.client.start()
         return len(deletes)
 

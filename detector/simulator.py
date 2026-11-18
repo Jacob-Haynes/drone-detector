@@ -181,6 +181,19 @@ INBOUND = RemoteIdFlight("BLE:E1:7A:3C:90:22:41", b"1581F5BKD23C0042", (1414.0 +
                          225.0, 8.0, 80.0, operator=(700.0, 650.0), operator_id=b"GBR-OP-SIMDEMO01")
 ORBIT = DjiOrbit("60:60:1F:5A:21:C4", b"08QDE5K0010042", "DJI-MAVICAIR-5A21C4", "60:60:1F:5A:21:C5")
 OUTBOUND = RemoteIdFlight("BLE:C4:2D:91:07:5E:13", b"1581F5FKD2B10099", (0.0, -200.0), 200.0, 10.0, 60.0)
+PARROT_MAC = "90:3A:E6:41:0C:7E"
+
+
+def continuous_tracks() -> list[tuple[str, str, bool]]:
+    """(MAC, serial, has an operator marker) for every drone the continuous loop puts on ATAK.
+
+    Fixed MACs and serials, so a restart (or a switch to DEMO_MODE=on_demand) can withdraw the
+    markers a previous run left behind. The Osmo camera, controller and background devices are
+    never alerted, so they have no markers."""
+    return [(INBOUND.mac, INBOUND.serial.decode(), INBOUND.operator is not None),
+            (ORBIT.mac, ORBIT.serial.decode(), True),  # DroneID carries the pilot position
+            (OUTBOUND.mac, OUTBOUND.serial.decode(), OUTBOUND.operator is not None),
+            (PARROT_MAC, "", False)]
 
 
 class DemoScenario:
@@ -207,7 +220,7 @@ class DemoScenario:
         # Parrot AP, no Remote ID: probable only (signal rises then falls: closing~ then opening~)
         if 120 <= t < 240:
             d = 150 + abs(t - 180) * 6
-            self._emit({"mac": "90:3A:E6:41:0C:7E", "rssi": rssi_at(d), "ssid": "Anafi-410C7E", "simulated": True,
+            self._emit({"mac": PARROT_MAC, "rssi": rssi_at(d), "ssid": "Anafi-410C7E", "simulated": True,
                         "frame_type": "beacon", "vendor_ies": [], "transport": "wifi"}, probability=0.3)
 
         # Drone-related devices that must NOT raise an alarm

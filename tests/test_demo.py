@@ -238,7 +238,7 @@ def test_page_has_demo_card():
 
 # ── modes at start-up ─────────────────────────────────────────────
 
-def _start(monkeypatch, argv, env_mode):
+def _start(monkeypatch, argv, env_mode, tak_port=None):
     """Run detector.__main__.main() far enough to see what it starts (no server, no hardware)."""
     import detector.__main__ as main_mod
     import detector.ble_scanner as ble_mod
@@ -286,7 +286,8 @@ def _start(monkeypatch, argv, env_mode):
         monkeypatch.setenv("DEMO_MODE", env_mode)
     else:
         monkeypatch.delenv("DEMO_MODE", raising=False)
-    monkeypatch.setattr(sys, "argv", ["detector", "--no-cot", "--no-mesh", *argv])
+    cot = ["--no-cot"] if tak_port is None else ["--tak-host", "127.0.0.1", "--tak-port", str(tak_port)]
+    monkeypatch.setattr(sys, "argv", ["detector", *cot, "--no-mesh", *argv])
     with pytest.raises(StopServer):
         main_mod.main()
     import time

@@ -116,6 +116,7 @@ The simulator flies one drone inbound with a 120 m CPA, one orbiting the OP at 6
 - **Labelling:** every demo drone is labelled as simulated, in live mode too: `SIM-` callsigns, `SIMULATED: ` remarks, `[SIM] ` mesh texts and the SIM tag on the page.
 - **Mesh texts:** a simulated drone and a real one never share a mesh text.
 - **Clear demo:** stops every scenario. It also removes their drones and their operator markers from the page and from ATAK at once: each marker is sent again with stale = now, then a `t-x-d-d` forcedelete, then the registration SA. Real detections are never touched.
+- **Withdrawn on stop and on switch:** when the detector stops (SIGTERM or Ctrl-C), it clears any demo drones. After a `--simulate` run in continuous mode, it also takes the continuous loop's drones and operators off ATAK the same way. Every start in on_demand mode does the same for markers an earlier continuous run left behind. Those uids are fixed, so this works after a restart too. Without the withdrawal they stayed on the map until stale (5 minutes).
 - **End of a scenario:** a scenario ends on its own when its time is up, and its CoT then expires as normal.
 
 API:
